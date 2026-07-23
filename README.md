@@ -15,8 +15,11 @@ Terraform (`infra/`) build off it, so they can never drift out of sync.
 - **Manifest-driven registry**: each entry in `manifest.apps[]` carries its
   OAuth config, declared `scopes`, and `access` (allowed groups, whether it
   gets a service token, optional per-app `session_duration`). Adding an app
-  is a manifest edit plus a `describeLink` wiring in `src/registry.ts` (see
-  "Adding a new app registration" below), not a code-and-Terraform rewrite.
+  is a manifest edit plus, where the provider needs it, a small
+  `describeLink`/`appAuth` wiring in `src/registry.ts` (see "Adding a new
+  app registration" below) — not a hand-edited `AppConfig` literal, though
+  it still requires a `terraform apply` to provision the per-app Access
+  resources before the new slug will actually authenticate.
 - **Per-app Access apps, not one shared app**: Terraform creates, per slug, a
   **token app** scoped to `broker.jsmunro.me/get-token/<slug>(/*)` and a
   separate, stricter **linking app** scoped to `.../callback/<slug>(/*)`
@@ -172,47 +175,54 @@ failures are logged and the stale cache is kept. Apps without `appAuth`
 
 ## Adding a new app registration
 
-1. Register the OAuth client (or GitHub App) on the provider side, and set
-   its callback/redirect URL to `https://broker.jsmunro.me/callback/<slug>`
-   using the slug you're about to assign it, e.g.
-   `https://broker.jsmunro.me/callback/github/jsmunro/some-client-id`.
-2. For a standard OAuth2 authorization-code flow, build the `AuthProvider`
-   with the `oauth2Provider(...)` factory in `src/oauth2.ts` (see the
-   example below). Only for a genuinely non-standard flow, hand-write a
-   module implementing the `AuthProvider` interface from `src/types.ts`
-   directly (`slug`, `getAuthUrl`, `handleCallback`, `refreshToken`,
-   optional `describeLink`).
-3. Add an `AppConfig` entry to `appConfigs` in `src/registry.ts`:
-   ```ts
-   const MY_APP_SLUG = "myprovider/myorg/myclientid";
+`apps/manifest.json` is the single source of truth; `src/registry.ts` builds
+`appConfigs` (and, from it, `apps`) from the manifest via
+`Object.fromEntries(manifest.apps.map(...))` — there is no `appConfigs`
+literal to hand-edit.
 
-   [MY_APP_SLUG]: {
-     slug: MY_APP_SLUG,
-     displayName: "My App",
-     provider: oauth2Provider({
-       slug: MY_APP_SLUG,
-       authorizeUrl: "...",
-       tokenUrl: "...",
-       clientIdVar: "MYPROVIDER_CLIENT_ID",
-       clientSecretVar: "MYPROVIDER_CLIENT_SECRET",
-       clientAuth: "body", // or "basic"
-     }),
-     // Optional — only if the provider supports app-level metadata auth:
-     // appAuth: { kind: "github-app-jwt", appIdVar: "MY_APP_ID", privateKeyVar: "MY_APP_PRIVATE_KEY" },
-   },
+1. Add an entry under `apps[]` in `apps/manifest.json` — `slug` (the
+   `provider/org/client-id`-shaped routing key), `display_name`, `auth`
+   (`kind`, `authorize_url`, `token_url`, `client_id_var`,
+   `client_secret_var`, `client_auth`, optionally `authorize_params_var` /
+   `require_refresh_token`), optional `app_auth` (currently only
+   `github-app-jwt`, with `app_id_var` / `private_key_var`), `scopes`
+   (`declared`, optional `source`), and `access` (`allow_groups`,
+   optional `service_token`, optional `session_duration`) — plus a new
+   entry under `groups{}` if the app needs a group that doesn't exist yet.
+   Then validate it:
+   ```bash
+   node scripts/validate-manifest.mjs
    ```
-   `apps` (the routing/`AuthProvider` map keyed by slug, used by the engine)
-   is derived automatically from `appConfigs` — there's nothing else to
-   register.
-4. Add the new env vars referenced above (client id/secret, and app-auth
-   vars if used) to the `Env` interface in `src/types.ts`, then push their
-   values via `wrangler secret put`:
+2. If the provider needs a `describeLink` (to fetch link details for the
+   dashboard) or non-standard `appAuth` wiring beyond the manifest's
+   `github-app-jwt` kind, add it to `src/registry.ts`, keyed by the new
+   slug — e.g. extend `describeLinkBySlug` with a `<provider>DescribeLink`
+   function following the `githubDescribeLink`/`cloudflareDescribeLink`
+   pattern. A standard OAuth2 authorization-code flow with no describeLink
+   needs no code changes at all; `buildAppConfig` wires `oauth2Provider(...)`
+   from the manifest fields automatically.
+3. Push the env vars the manifest names (`client_id_var`,
+   `client_secret_var`, and `app_auth`'s vars if present) as secrets:
    ```bash
    npx wrangler secret put MYPROVIDER_CLIENT_ID
    npx wrangler secret put MYPROVIDER_CLIENT_SECRET
    ```
-5. Write vitest unit tests under `test/` mirroring the existing provider
-   tests (auth URL shape, callback exchange, refresh exchange, error paths).
+4. Register the callback/redirect URL on the provider side as
+   `https://broker.jsmunro.me/callback/<slug>`, using the slug you assigned
+   it, e.g. `https://broker.jsmunro.me/callback/github/jsmunro/some-client-id`.
+5. Provision the per-app Access resources and roll out, **in this order**
+   (see `infra/README.md` §7 for the full runbook):
+   ```bash
+   terraform -chdir=infra apply   # creates the per-app token/link apps, groups, service token
+   ./infra/sync-auds.sh           # writes the new slug's AUDs into wrangler.toml
+   npm run deploy                 # wrangler deploy
+   ```
+   The order is mandatory: strict per-app AUD enforcement fails closed
+   (`403`) on the new slug until `sync-auds.sh` has run after the apply.
+6. Write vitest tests under `test/` mirroring `test/github.test.ts` — drive
+   the shared `providerContractTests` from `test/contract.ts` against the
+   new slug (auth URL shape, callback exchange, refresh exchange, error
+   paths), adding any provider-specific assertions alongside it.
 
 ## Deployment
 
