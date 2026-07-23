@@ -27,3 +27,18 @@ resource "cloudflare_zero_trust_access_identity_provider" "okta" {
     claims                  = ["amr", "groups", "device_trusted", "risk_level"]
   }
 }
+
+############################################
+# One-Time-PIN IdP — the break-glass login path. The org-members group
+# includes an explicit email; without a non-GitHub IdP on the apps'
+# allowed_idps lists that email include is unreachable during a GitHub
+# IdP outage (final-review Finding 1). OTP restores it: the break-glass
+# email can request a login code. Policies still gate WHO gets in.
+############################################
+
+resource "cloudflare_zero_trust_access_identity_provider" "otp" {
+  account_id = var.account_id
+  name       = "One-time PIN (break-glass)"
+  type       = "onetimepin"
+  config {}
+}

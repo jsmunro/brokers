@@ -13,8 +13,8 @@ resource "cloudflare_zero_trust_access_application" "root" {
   http_only_cookie_attribute = true
   app_launcher_visible       = true
   # Preserve settings configured on the live app since its creation:
-  allowed_idps              = [var.github_idp_id]
-  auto_redirect_to_identity = true
+  allowed_idps              = [var.github_idp_id, cloudflare_zero_trust_access_identity_provider.otp.id]
+  auto_redirect_to_identity = false # two IdPs: picker shown; auto-redirect only works with exactly one
 }
 
 import {
@@ -68,8 +68,8 @@ resource "cloudflare_zero_trust_access_application" "token" {
   session_duration     = each.value.session_duration
   app_launcher_visible = false
   # Same IdP pinning/redirect UX as the root app.
-  allowed_idps              = [var.github_idp_id]
-  auto_redirect_to_identity = true
+  allowed_idps              = [var.github_idp_id, cloudflare_zero_trust_access_identity_provider.otp.id]
+  auto_redirect_to_identity = false # two IdPs: picker shown; auto-redirect only works with exactly one
 
   self_hosted_domains = [
     "${var.domain}/get-token/${each.key}",
@@ -115,8 +115,8 @@ resource "cloudflare_zero_trust_access_application" "link" {
   session_duration     = each.value.session_duration
   app_launcher_visible = false
   # Same IdP pinning/redirect UX as the root app.
-  allowed_idps              = [var.github_idp_id]
-  auto_redirect_to_identity = true
+  allowed_idps              = [var.github_idp_id, cloudflare_zero_trust_access_identity_provider.otp.id]
+  auto_redirect_to_identity = false # two IdPs: picker shown; auto-redirect only works with exactly one
 
   self_hosted_domains = [
     "${var.domain}/callback/${each.key}",
