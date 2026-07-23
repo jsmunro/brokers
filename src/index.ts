@@ -1,4 +1,4 @@
-import type { AuthProvider, Env } from "./types";
+import type { AuthProvider, Env, LinkMeta } from "./types";
 import { verifyAccessJwt } from "./access";
 import { GitHubProvider } from "./providers/github";
 import { CloudflareProvider } from "./providers/cloudflare";
@@ -9,9 +9,69 @@ const providers: Record<string, AuthProvider> = {
 };
 
 const KV_PREFIX = "refresh:";
+const META_PREFIX = "meta:";
 
 function kvKey(provider: string, userId: string): string {
   return `${KV_PREFIX}${provider}:${userId}`;
+}
+
+/** KV key for a provider link's metadata. Exported for the dashboard layer (Task 2). */
+export function metaKey(provider: string, userId: string): string {
+  return `${META_PREFIX}${provider}:${userId}`;
+}
+
+/**
+ * Best-effort write of the link metadata after a successful callback. Never
+ * throws: any failure (KV or describeLink) is logged and swallowed so it can
+ * never fail the user-facing callback response.
+ */
+export async function writeMeta(
+  env: Env,
+  provider: AuthProvider,
+  userId: string,
+  data: any
+): Promise<void> {
+  try {
+    const meta: LinkMeta = { linked_at: new Date().toISOString() };
+
+    if (provider.describeLink && data?.access_token) {
+      try {
+        meta.details = await provider.describeLink(data.access_token, env);
+      } catch (err) {
+        console.error(`writeMeta: describeLink failed for ${provider.slug}:${userId}`, err);
+      }
+    }
+
+    await env.AUTH_TOKENS.put(metaKey(provider.slug, userId), JSON.stringify(meta));
+  } catch (err) {
+    console.error(`writeMeta: failed to write meta for ${provider.slug}:${userId}`, err);
+  }
+}
+
+/**
+ * Best-effort update of `last_refreshed` on the meta key, preserving any
+ * existing `linked_at`/`details`. Creates the meta key if it's absent (e.g.
+ * for links created before this feature existed). Never throws.
+ */
+export async function touchMeta(env: Env, providerSlug: string, userId: string): Promise<void> {
+  try {
+    const key = metaKey(providerSlug, userId);
+    const existing = (await env.AUTH_TOKENS.get(key, "json")) as LinkMeta | null;
+    const meta: LinkMeta = existing ? { ...existing } : { linked_at: new Date().toISOString() };
+    meta.last_refreshed = new Date().toISOString();
+    await env.AUTH_TOKENS.put(key, JSON.stringify(meta));
+  } catch (err) {
+    console.error(`touchMeta: failed to update meta for ${providerSlug}:${userId}`, err);
+  }
+}
+
+/** Best-effort delete of the meta key. Never throws. */
+async function deleteMeta(env: Env, providerSlug: string, userId: string): Promise<void> {
+  try {
+    await env.AUTH_TOKENS.delete(metaKey(providerSlug, userId));
+  } catch (err) {
+    console.error(`deleteMeta: failed to delete meta for ${providerSlug}:${userId}`, err);
+  }
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -32,8 +92,9 @@ async function handleCallback(
   userId: string
 ): Promise<Response> {
   try {
-    const { refreshToken } = await provider.handleCallback(request, env);
+    const { refreshToken, data } = await provider.handleCallback(request, env);
     await env.AUTH_TOKENS.put(kvKey(provider.slug, userId), refreshToken);
+    await writeMeta(env, provider, userId, data);
     return new Response(`<html><body><h1>${provider.slug.toUpperCase()} Linked!</h1></body></html>`, {
       status: 200,
       headers: { "Content-Type": "text/html" },
@@ -65,6 +126,7 @@ async function handleGetToken(
     if (result.newRefreshToken) {
       await env.AUTH_TOKENS.put(key, result.newRefreshToken);
     }
+    await touchMeta(env, provider.slug, userId);
     return jsonResponse({
       token: result.token,
       expires_in: result.expires_in,
@@ -72,6 +134,7 @@ async function handleGetToken(
     });
   } catch (err) {
     await env.AUTH_TOKENS.delete(key);
+    await deleteMeta(env, provider.slug, userId);
     return setupRequiredResponse(provider, env, userId);
   }
 }
@@ -137,6 +200,7 @@ export default {
         if (result.newRefreshToken) {
           await env.AUTH_TOKENS.put(key.name, result.newRefreshToken);
         }
+        await touchMeta(env, provider.slug, userId);
       } catch (err) {
         console.error(`scheduled: failed to refresh ${key.name}`, err);
       }

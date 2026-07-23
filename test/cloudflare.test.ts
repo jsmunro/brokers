@@ -172,4 +172,58 @@ describe("CloudflareProvider", () => {
 
     await expect(provider.refreshToken("cf_old", env)).rejects.toThrow("Refresh token is invalid");
   });
+
+  describe("describeLink", () => {
+    it("calls the userinfo endpoint with bearer auth and flattens string/number claims", async () => {
+      const env = makeEnv();
+      const provider = new CloudflareProvider();
+
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(input.toString()).toBe("https://dash.cloudflare.com/oauth2/userinfo");
+        const headers = init?.headers as Record<string, string>;
+        expect(headers.Authorization).toBe("Bearer cf_access");
+
+        return new Response(
+          JSON.stringify({ email: "user@example.com", sub: "abc123", nested: { ignored: true } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await provider.describeLink!("cf_access", env);
+      expect(result).toEqual({ email: "user@example.com", sub: "abc123" });
+    });
+
+    it("stringifies numeric claims", async () => {
+      const env = makeEnv();
+      const provider = new CloudflareProvider();
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          return new Response(JSON.stringify({ email: "user@example.com", account_id: 42 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        })
+      );
+
+      const result = await provider.describeLink!("cf_access", env);
+      expect(result).toEqual({ email: "user@example.com", account_id: "42" });
+    });
+
+    it("throws on a non-2xx response", async () => {
+      const env = makeEnv();
+      const provider = new CloudflareProvider();
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          return new Response("Unauthorized", { status: 401 });
+        })
+      );
+
+      await expect(provider.describeLink!("bad_token", env)).rejects.toThrow();
+    });
+  });
 });

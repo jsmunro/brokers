@@ -2,6 +2,7 @@ import type { AuthProvider, Env, TokenPayload } from "../types";
 
 const CLOUDFLARE_AUTHORIZE_URL = "https://dash.cloudflare.com/oauth2/auth";
 const CLOUDFLARE_TOKEN_URL = "https://dash.cloudflare.com/oauth2/token";
+const CLOUDFLARE_USERINFO_URL = "https://dash.cloudflare.com/oauth2/userinfo";
 
 interface CloudflareTokenResponse {
   access_token?: string;
@@ -113,5 +114,24 @@ export class CloudflareProvider implements AuthProvider {
     }
 
     return result;
+  }
+
+  async describeLink(token: string, _env: Env): Promise<Record<string, string>> {
+    const res = await fetch(CLOUDFLARE_USERINFO_URL, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!res.ok) {
+      throw new Error(`Cloudflare describeLink failed (${res.status})`);
+    }
+
+    const json = (await res.json()) as Record<string, unknown>;
+    const details: Record<string, string> = {};
+    for (const [key, value] of Object.entries(json)) {
+      if (typeof value === "string" || typeof value === "number") {
+        details[key] = String(value);
+      }
+    }
+    return details;
   }
 }

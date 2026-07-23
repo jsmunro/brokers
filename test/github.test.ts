@@ -141,4 +141,61 @@ describe("GitHubProvider", () => {
 
     await expect(provider.refreshToken("ghr_old", env)).rejects.toThrow("bad_refresh_token");
   });
+
+  describe("describeLink", () => {
+    it("calls GitHub /user with bearer auth and returns login/name/id as strings", async () => {
+      const env = makeEnv();
+      const provider = new GitHubProvider();
+
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(input.toString()).toBe("https://api.github.com/user");
+        const headers = init?.headers as Record<string, string>;
+        expect(headers.Authorization).toBe("Bearer gho_token");
+        expect(headers.Accept).toBe("application/vnd.github+json");
+        expect(headers["User-Agent"]).toBeTruthy();
+
+        return new Response(JSON.stringify({ login: "octocat", id: 123, name: "Mona Lisa" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await provider.describeLink!("gho_token", env);
+      expect(result).toEqual({ login: "octocat", id: "123", name: "Mona Lisa" });
+    });
+
+    it("omits a null name field", async () => {
+      const env = makeEnv();
+      const provider = new GitHubProvider();
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          return new Response(JSON.stringify({ login: "octocat", id: 123, name: null }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        })
+      );
+
+      const result = await provider.describeLink!("gho_token", env);
+      expect(result).toEqual({ login: "octocat", id: "123" });
+      expect(result.name).toBeUndefined();
+    });
+
+    it("throws on a non-2xx response", async () => {
+      const env = makeEnv();
+      const provider = new GitHubProvider();
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          return new Response("Unauthorized", { status: 401 });
+        })
+      );
+
+      await expect(provider.describeLink!("bad_token", env)).rejects.toThrow();
+    });
+  });
 });

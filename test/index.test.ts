@@ -10,7 +10,7 @@ vi.mock("../src/access", () => ({
   }),
 }));
 
-import worker from "../src/index";
+import worker, { metaKey, writeMeta } from "../src/index";
 
 describe("router fetch", () => {
   beforeEach(() => {
@@ -195,6 +195,229 @@ describe("router fetch", () => {
     const stored = await env.AUTH_TOKENS.get("refresh:github:user@example.com");
     expect(stored).toBeNull();
   });
+
+  it("get-token refresh failure deletes both the refresh key and the meta key", async () => {
+    const env = makeEnv();
+    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_old");
+    await env.AUTH_TOKENS.put(
+      "meta:github:user@example.com",
+      JSON.stringify({ linked_at: "2026-01-01T00:00:00.000Z" })
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(JSON.stringify({ error: "bad_refresh_token" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/get-token/github", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    expect(await env.AUTH_TOKENS.get("refresh:github:user@example.com")).toBeNull();
+    expect(await env.AUTH_TOKENS.get("meta:github:user@example.com")).toBeNull();
+  });
+
+  it("callback success writes meta with linked_at and details when describeLink succeeds", async () => {
+    const env = makeEnv();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input.toString();
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response(
+            JSON.stringify({ access_token: "gho_token", refresh_token: "ghr_refresh", expires_in: 28800 }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url === "https://api.github.com/user") {
+          return new Response(JSON.stringify({ login: "octocat", id: 123, name: "Mona Lisa" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/callback/github?code=abc123", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    expect(res.status).toBe(200);
+
+    const meta = (await env.AUTH_TOKENS.get("meta:github:user@example.com", "json")) as any;
+    expect(meta.linked_at).toBeTruthy();
+    expect(meta.details).toEqual({ login: "octocat", id: "123", name: "Mona Lisa" });
+  });
+
+  it("callback still succeeds and stores the refresh token when describeLink rejects", async () => {
+    const env = makeEnv();
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input.toString();
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response(
+            JSON.stringify({ access_token: "gho_token", refresh_token: "ghr_refresh", expires_in: 28800 }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url === "https://api.github.com/user") {
+          return new Response("Unauthorized", { status: 401 });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/callback/github?code=abc123", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    expect(await env.AUTH_TOKENS.get("refresh:github:user@example.com")).toBe("ghr_refresh");
+
+    const meta = (await env.AUTH_TOKENS.get("meta:github:user@example.com", "json")) as any;
+    expect(meta.linked_at).toBeTruthy();
+    expect(meta.details).toBeUndefined();
+    expect(consoleErrorSpy).toHaveBeenCalled();
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("callback writes meta without details when the token response omits access_token", async () => {
+    const env = makeEnv();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input.toString();
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response(JSON.stringify({ refresh_token: "ghr_refresh", expires_in: 28800 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/callback/github?code=abc123", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const meta = (await env.AUTH_TOKENS.get("meta:github:user@example.com", "json")) as any;
+    expect(meta.linked_at).toBeTruthy();
+    expect(meta.details).toBeUndefined();
+  });
+
+  it("get-token refresh success updates last_refreshed while preserving linked_at and details", async () => {
+    const env = makeEnv();
+    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_old");
+    await env.AUTH_TOKENS.put(
+      "meta:github:user@example.com",
+      JSON.stringify({ linked_at: "2026-01-01T00:00:00.000Z", details: { login: "octocat" } })
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({ access_token: "gho_new", expires_in: 28800, refresh_token: "ghr_new" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/get-token/github", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const meta = (await env.AUTH_TOKENS.get("meta:github:user@example.com", "json")) as any;
+    expect(meta.linked_at).toBe("2026-01-01T00:00:00.000Z");
+    expect(meta.details).toEqual({ login: "octocat" });
+    expect(meta.last_refreshed).toBeTruthy();
+  });
+
+  it("get-token refresh success creates a meta key when none existed before", async () => {
+    const env = makeEnv();
+    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_old");
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({ access_token: "gho_new", expires_in: 28800, refresh_token: "ghr_new" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/get-token/github", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const meta = (await env.AUTH_TOKENS.get("meta:github:user@example.com", "json")) as any;
+    expect(meta.linked_at).toBeTruthy();
+    expect(meta.last_refreshed).toBeTruthy();
+  });
+});
+
+describe("metaKey / writeMeta helpers", () => {
+  it("metaKey builds the meta:<provider>:<userId> KV key", () => {
+    expect(metaKey("github", "user@example.com")).toBe("meta:github:user@example.com");
+  });
+
+  it("writeMeta writes meta without details when the provider has no describeLink method", async () => {
+    const env = makeEnv();
+    const fakeProvider = {
+      slug: "fake",
+      getAuthUrl: () => "https://example.com/auth",
+      handleCallback: async () => ({ refreshToken: "x", data: {} }),
+      refreshToken: async () => ({ token: "x" }),
+    };
+
+    await writeMeta(env, fakeProvider as any, "user@example.com", { access_token: "tok" });
+
+    const meta = (await env.AUTH_TOKENS.get(metaKey("fake", "user@example.com"), "json")) as any;
+    expect(meta.linked_at).toBeTruthy();
+    expect(meta.details).toBeUndefined();
+  });
+
+  it("writeMeta never throws when the KV put itself fails", async () => {
+    const env = makeEnv();
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    (env.AUTH_TOKENS.put as any) = vi.fn(async () => {
+      throw new Error("kv unavailable");
+    });
+
+    const fakeProvider = {
+      slug: "fake",
+      getAuthUrl: () => "",
+      handleCallback: async () => ({ refreshToken: "x", data: {} }),
+      refreshToken: async () => ({ token: "x" }),
+    };
+
+    await expect(
+      writeMeta(env, fakeProvider as any, "user@example.com", { access_token: "tok" })
+    ).resolves.toBeUndefined();
+    expect(consoleErrorSpy).toHaveBeenCalled();
+
+    consoleErrorSpy.mockRestore();
+  });
 });
 
 describe("scheduled cron rotation", () => {
@@ -256,5 +479,30 @@ describe("scheduled cron rotation", () => {
     expect(consoleErrorSpy).toHaveBeenCalled();
 
     consoleErrorSpy.mockRestore();
+  });
+
+  it("updates last_refreshed in the meta key on successful cron refresh", async () => {
+    const env = makeEnv();
+    await env.AUTH_TOKENS.put("refresh:github:alice@example.com", "ghr_alice_old");
+    await env.AUTH_TOKENS.put(
+      "meta:github:alice@example.com",
+      JSON.stringify({ linked_at: "2026-01-01T00:00:00.000Z" })
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({ access_token: "tok", expires_in: 28800, refresh_token: "ghr_alice_new" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    await worker.scheduled({} as any, env, {} as any);
+
+    const meta = (await env.AUTH_TOKENS.get("meta:github:alice@example.com", "json")) as any;
+    expect(meta.linked_at).toBe("2026-01-01T00:00:00.000Z");
+    expect(meta.last_refreshed).toBeTruthy();
   });
 });

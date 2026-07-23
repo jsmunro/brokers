@@ -26,4 +26,11 @@ export interface AuthProvider {
     env: Env,
     accessJwt?: string
   ): Promise<TokenPayload & { newRefreshToken?: string }>;
+  describeLink?(token: string, env: Env): Promise<Record<string, string>>;
+}
+
+export interface LinkMeta {
+  linked_at: string;
+  last_refreshed?: string;
+  details?: Record<string, string>;
 }

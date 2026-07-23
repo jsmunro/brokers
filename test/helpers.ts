@@ -5,8 +5,12 @@ export function makeKvStub() {
   const store = new Map<string, string>();
 
   const kv = {
-    async get(key: string): Promise<string | null> {
-      return store.has(key) ? store.get(key)! : null;
+    async get(key: string, type?: "text" | "json"): Promise<any> {
+      const raw = store.has(key) ? store.get(key)! : null;
+      if (raw !== null && type === "json") {
+        return JSON.parse(raw);
+      }
+      return raw;
     },
     async put(key: string, value: string): Promise<void> {
       store.set(key, value);

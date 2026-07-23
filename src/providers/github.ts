@@ -2,6 +2,7 @@ import type { AuthProvider, Env, TokenPayload } from "../types";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
+const GITHUB_USER_URL = "https://api.github.com/user";
 
 interface GitHubTokenResponse {
   access_token?: string;
@@ -106,5 +107,32 @@ export class GitHubProvider implements AuthProvider {
       expires_in: json.expires_in,
       newRefreshToken: json.refresh_token,
     };
+  }
+
+  async describeLink(token: string, _env: Env): Promise<Record<string, string>> {
+    const res = await fetch(GITHUB_USER_URL, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "central-auth-broker",
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(`GitHub describeLink failed (${res.status})`);
+    }
+
+    const json = (await res.json()) as { login?: string; name?: string | null; id?: number };
+    const details: Record<string, string> = {};
+    if (json.login !== undefined && json.login !== null) {
+      details.login = String(json.login);
+    }
+    if (json.id !== undefined && json.id !== null) {
+      details.id = String(json.id);
+    }
+    if (json.name !== undefined && json.name !== null) {
+      details.name = String(json.name);
+    }
+    return details;
   }
 }
