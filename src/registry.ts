@@ -1,11 +1,19 @@
-import type { AppConfig, AuthProvider, Env } from "./types";
+import type { AppConfig, AuthProvider, Env, Manifest } from "./types";
 import { oauth2Provider } from "./oauth2";
+import manifestJson from "../apps/manifest.json";
 
-const GITHUB_USER_URL = "https://api.github.com/user";
-const CLOUDFLARE_USERINFO_URL = "https://dash.cloudflare.com/oauth2/userinfo";
+// wrangler/esbuild and vitest both resolve this as a native JSON import
+// (tsconfig `resolveJsonModule`); the manifest is the single source of truth
+// for app registration — this module is a thin adapter from it to the
+// worker's runtime types. `describeLink`/`appAuth` wiring that needs actual
+// code (not just data) stays here, keyed by slug.
+const manifest = manifestJson as unknown as Manifest;
 
 export const GITHUB_SLUG = "github/jsmunro/Iv23lifj0i4aV6qYR76i";
 export const CLOUDFLARE_SLUG = "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc";
+
+const GITHUB_USER_URL = "https://api.github.com/user";
+const CLOUDFLARE_USERINFO_URL = "https://dash.cloudflare.com/oauth2/userinfo";
 
 async function githubDescribeLink(token: string, _env: Env): Promise<Record<string, string>> {
   const res = await fetch(GITHUB_USER_URL, {
@@ -54,39 +62,70 @@ async function cloudflareDescribeLink(token: string, _env: Env): Promise<Record<
 }
 
 /**
- * The two registered apps. Engine and dashboard import ONLY from this
- * module — the registry key IS the routing/KV slug.
+ * `describeLink` implementations, keyed by full slug. The manifest carries no
+ * code — only data — so this map is how code-side behavior stays wired to a
+ * manifest-declared app.
  */
-export const appConfigs: Record<string, AppConfig> = {
-  [GITHUB_SLUG]: {
-    slug: GITHUB_SLUG,
-    displayName: "Brokers repo",
-    provider: oauth2Provider({
-      slug: GITHUB_SLUG,
-      authorizeUrl: "https://github.com/login/oauth/authorize",
-      tokenUrl: "https://github.com/login/oauth/access_token",
-      clientIdVar: "GITHUB_CLIENT_ID",
-      clientSecretVar: "GITHUB_CLIENT_SECRET",
-      clientAuth: "body",
-      describeLink: githubDescribeLink,
-    }),
-    appAuth: { kind: "github-app-jwt", appIdVar: "GITHUB_APP_ID", privateKeyVar: "GITHUB_APP_PRIVATE_KEY" },
-  },
-  [CLOUDFLARE_SLUG]: {
-    slug: CLOUDFLARE_SLUG,
-    displayName: "central-auth-broker",
-    provider: oauth2Provider({
-      slug: CLOUDFLARE_SLUG,
-      authorizeUrl: "https://dash.cloudflare.com/oauth2/auth",
-      tokenUrl: "https://dash.cloudflare.com/oauth2/token",
-      clientIdVar: "CLOUDFLARE_OAUTH_CLIENT_ID",
-      clientSecretVar: "CLOUDFLARE_OAUTH_CLIENT_SECRET",
-      clientAuth: "body",
-      authorizeParams: (env) => ({ scope: env.CLOUDFLARE_OAUTH_SCOPES }),
-      describeLink: cloudflareDescribeLink,
-    }),
-  },
+const describeLinkBySlug: Record<string, (token: string, env: Env) => Promise<Record<string, string>>> = {
+  [GITHUB_SLUG]: githubDescribeLink,
+  [CLOUDFLARE_SLUG]: cloudflareDescribeLink,
 };
+
+/** Builds an `authorizeParams` fn reading a single env var as the `scope` value, or `undefined` if unset. */
+function buildAuthorizeParams(
+  authorizeParamsVar: string | undefined
+): ((env: Env) => Record<string, string>) | undefined {
+  if (!authorizeParamsVar) {
+    return undefined;
+  }
+  return (env: Env) => ({ scope: (env as unknown as Record<string, string>)[authorizeParamsVar] ?? "" });
+}
+
+function buildAppConfig(app: Manifest["apps"][number]): AppConfig {
+  const provider = oauth2Provider({
+    slug: app.slug,
+    authorizeUrl: app.auth.authorize_url,
+    tokenUrl: app.auth.token_url,
+    clientIdVar: app.auth.client_id_var as keyof Env & string,
+    clientSecretVar: app.auth.client_secret_var as keyof Env & string,
+    clientAuth: app.auth.client_auth,
+    authorizeParams: buildAuthorizeParams(app.auth.authorize_params_var),
+    requireRefreshToken: app.auth.require_refresh_token,
+    describeLink: describeLinkBySlug[app.slug],
+  });
+
+  const config: AppConfig = {
+    slug: app.slug,
+    displayName: app.display_name,
+    provider,
+    scopes: {
+      declared: app.scopes.declared,
+      ...(app.scopes.source ? { source: app.scopes.source } : {}),
+    },
+    access: {
+      groups: app.access.allow_groups ?? manifest.defaults.access.allow_groups,
+      serviceToken: app.access.service_token ?? false,
+    },
+  };
+
+  if (app.app_auth) {
+    config.appAuth = {
+      kind: "github-app-jwt",
+      appIdVar: app.app_auth.app_id_var,
+      privateKeyVar: app.app_auth.private_key_var,
+    };
+  }
+
+  return config;
+}
+
+/**
+ * The registered apps, built from `apps/manifest.json`. Engine and dashboard
+ * import ONLY from this module — the registry key IS the routing/KV slug.
+ */
+export const appConfigs: Record<string, AppConfig> = Object.fromEntries(
+  manifest.apps.map((app) => [app.slug, buildAppConfig(app)])
+);
 
 /** `AuthProvider`s keyed by full slug, for routing and refresh/callback handling. */
 export const apps: Record<string, AuthProvider> = Object.fromEntries(

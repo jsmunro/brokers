@@ -1,0 +1,18 @@
+# Copy to infra/backend.hcl (gitignored — contains R2 credentials) and fill
+# in the access_key/secret_key from the R2-scoped API token created per
+# infra/bootstrap.sh's instructions.
+#
+# Usage: terraform -chdir=infra init -backend-config=backend.hcl
+
+bucket                      = "broker-terraform-state"
+key                         = "per-app-access/terraform.tfstate"
+region                      = "auto"
+endpoint                    = "https://314e7e015b5f4429c4e2da1e6ec93271.r2.cloudflarestorage.com"
+access_key                  = "REPLACE_ME_R2_ACCESS_KEY_ID"
+secret_key                  = "REPLACE_ME_R2_SECRET_ACCESS_KEY"
+skip_credentials_validation = true
+skip_region_validation      = true
+skip_requesting_account_id  = true
+skip_metadata_api_check     = true
+skip_s3_checksum            = true
+use_path_style              = true

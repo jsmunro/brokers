@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { verifyAccessJwt, __resetJwksCacheForTests } from "../src/access";
+import { verifyAccessJwt, parseAccessAppAuds, __resetJwksCacheForTests } from "../src/access";
 import { makeEnv, generateTestKeyPair, signTestJwt } from "./helpers";
 
 describe("verifyAccessJwt", () => {
@@ -39,7 +39,7 @@ describe("verifyAccessJwt", () => {
       privateKey
     );
 
-    const payload = await verifyAccessJwt(jwt, env);
+    const payload = await verifyAccessJwt(jwt, env, [env.ACCESS_AUD]);
     expect(payload.email).toBe("user@example.com");
   });
 
@@ -66,7 +66,7 @@ describe("verifyAccessJwt", () => {
       .replace(/=+$/, "");
     const tampered = `${h}.${tamperedPayload}.${s}`;
 
-    await expect(verifyAccessJwt(tampered, env)).rejects.toThrow();
+    await expect(verifyAccessJwt(tampered, env, [env.ACCESS_AUD])).rejects.toThrow();
   });
 
   it("rejects an expired JWT", async () => {
@@ -83,7 +83,7 @@ describe("verifyAccessJwt", () => {
       privateKey
     );
 
-    await expect(verifyAccessJwt(jwt, env)).rejects.toThrow(/expired/);
+    await expect(verifyAccessJwt(jwt, env, [env.ACCESS_AUD])).rejects.toThrow(/expired/);
   });
 
   it("rejects a JWT with the wrong audience", async () => {
@@ -100,7 +100,7 @@ describe("verifyAccessJwt", () => {
       privateKey
     );
 
-    await expect(verifyAccessJwt(jwt, env)).rejects.toThrow(/aud/);
+    await expect(verifyAccessJwt(jwt, env, [env.ACCESS_AUD])).rejects.toThrow(/aud/);
   });
 
   it("rejects a JWT with the wrong issuer", async () => {
@@ -117,7 +117,7 @@ describe("verifyAccessJwt", () => {
       privateKey
     );
 
-    await expect(verifyAccessJwt(jwt, env)).rejects.toThrow(/iss/);
+    await expect(verifyAccessJwt(jwt, env, [env.ACCESS_AUD])).rejects.toThrow(/iss/);
   });
 
   it("rejects a not-yet-valid (nbf) JWT", async () => {
@@ -135,7 +135,7 @@ describe("verifyAccessJwt", () => {
       privateKey
     );
 
-    await expect(verifyAccessJwt(jwt, env)).rejects.toThrow(/not yet valid/);
+    await expect(verifyAccessJwt(jwt, env, [env.ACCESS_AUD])).rejects.toThrow(/not yet valid/);
   });
 
   it("forces a JWKS refetch on kid miss and succeeds once the rotated key is returned", async () => {
@@ -175,7 +175,7 @@ describe("verifyAccessJwt", () => {
       "new-kid"
     );
 
-    const payload = await verifyAccessJwt(jwt, env);
+    const payload = await verifyAccessJwt(jwt, env, [env.ACCESS_AUD]);
     expect(payload.email).toBe("user@example.com");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -196,6 +196,83 @@ describe("verifyAccessJwt", () => {
       "totally-unknown-kid"
     );
 
-    await expect(verifyAccessJwt(jwt, env)).rejects.toThrow(/No matching JWKS key/);
+    await expect(verifyAccessJwt(jwt, env, [env.ACCESS_AUD])).rejects.toThrow(/No matching JWKS key/);
+  });
+
+  it("accepts a JWT whose aud intersects a multi-entry expectedAuds list", async () => {
+    const env = makeEnv();
+    const { privateKey } = await setupJwks();
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = await signTestJwt(
+      {
+        email: "user@example.com",
+        aud: "some-slug-token-aud",
+        iss: `https://${env.ACCESS_TEAM_DOMAIN}`,
+        exp: now + 3600,
+      },
+      privateKey
+    );
+
+    const payload = await verifyAccessJwt(jwt, env, ["some-slug-token-aud", "some-other-aud"]);
+    expect(payload.email).toBe("user@example.com");
+  });
+
+  it("STRICT mode: rejects a JWT whose aud equals the root ACCESS_AUD but isn't in the (per-slug) expectedAuds list", async () => {
+    const env = makeEnv();
+    const { privateKey } = await setupJwks();
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = await signTestJwt(
+      {
+        email: "user@example.com",
+        aud: env.ACCESS_AUD,
+        iss: `https://${env.ACCESS_TEAM_DOMAIN}`,
+        exp: now + 3600,
+      },
+      privateKey
+    );
+
+    await expect(verifyAccessJwt(jwt, env, ["github-token-aud"])).rejects.toThrow(/aud/);
+  });
+
+  it("returns common_name (no email) for a service-token non_identity JWT", async () => {
+    const env = makeEnv();
+    const { privateKey } = await setupJwks();
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = await signTestJwt(
+      {
+        common_name: "svc-token-client-id.access",
+        aud: "github-token-aud",
+        iss: `https://${env.ACCESS_TEAM_DOMAIN}`,
+        exp: now + 3600,
+      },
+      privateKey
+    );
+
+    const payload = await verifyAccessJwt(jwt, env, ["github-token-aud"]);
+    expect(payload.email).toBeUndefined();
+    expect(payload.common_name).toBe("svc-token-client-id.access");
+  });
+});
+
+describe("parseAccessAppAuds", () => {
+  it("parses a well-formed ACCESS_APP_AUDS map", () => {
+    const env = makeEnv({
+      ACCESS_APP_AUDS: JSON.stringify({ "github/jsmunro/x": { token: "t-aud", link: "l-aud" } }),
+    });
+
+    expect(parseAccessAppAuds(env)).toEqual({ "github/jsmunro/x": { token: "t-aud", link: "l-aud" } });
+  });
+
+  it("throws a clear error on malformed JSON", () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{not json" });
+    expect(() => parseAccessAppAuds(env)).toThrow(/ACCESS_APP_AUDS/);
+  });
+
+  it("throws when the top level isn't a JSON object", () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "[1,2,3]" });
+    expect(() => parseAccessAppAuds(env)).toThrow(/ACCESS_APP_AUDS/);
+
+    const env2 = makeEnv({ ACCESS_APP_AUDS: "null" });
+    expect(() => parseAccessAppAuds(env2)).toThrow(/ACCESS_APP_AUDS/);
   });
 });

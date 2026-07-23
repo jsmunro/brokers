@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "defaults": {
+    "access": {
+      "session_duration": "24h",
+      "allow_groups": ["org-members"]
+    },
+    "link_policy": {
+      "require_warp": true,
+      "require_posture": []
+    }
+  },
+  "groups": {
+    "org-members": {
+      "github_team": null,
+      "emails": ["jack@jsmunro.me"]
+    }
+  },
+  "apps": [
+    {
+      "slug": "github/jsmunro/Iv23lifj0i4aV6qYR76i",
+      "display_name": "Brokers repo",
+      "auth": {
+        "kind": "oauth2",
+        "authorize_url": "https://github.com/login/oauth/authorize",
+        "token_url": "https://github.com/login/oauth/access_token",
+        "client_id_var": "GITHUB_CLIENT_ID",
+        "client_secret_var": "GITHUB_CLIENT_SECRET",
+        "client_auth": "body"
+      },
+      "app_auth": {
+        "kind": "github-app-jwt",
+        "app_id_var": "GITHUB_APP_ID",
+        "private_key_var": "GITHUB_APP_PRIVATE_KEY"
+      },
+      "scopes": {
+        "declared": "installation-defined",
+        "source": "metadata.permissions"
+      },
+      "access": {
+        "allow_groups": ["org-members"],
+        "service_token": true
+      }
+    },
+    {
+      "slug": "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc",
+      "display_name": "central-auth-broker",
+      "auth": {
+        "kind": "oauth2",
+        "authorize_url": "https://dash.cloudflare.com/oauth2/auth",
+        "token_url": "https://dash.cloudflare.com/oauth2/token",
+        "client_id_var": "CLOUDFLARE_OAUTH_CLIENT_ID",
+        "client_secret_var": "CLOUDFLARE_OAUTH_CLIENT_SECRET",
+        "client_auth": "body",
+        "authorize_params_var": "CLOUDFLARE_OAUTH_SCOPES"
+      },
+      "scopes": {
+        "declared": "var:CLOUDFLARE_OAUTH_SCOPES"
+      },
+      "access": {
+        "allow_groups": ["org-members"]
+      }
+    }
+  ]
+}

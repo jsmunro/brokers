@@ -1,16 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { makeEnv, makeKvStub, exportPrivateKeyAsPkcs8Pem, generateTestKeyPair } from "./helpers";
 
-vi.mock("../src/access", () => ({
-  verifyAccessJwt: vi.fn(async (jwt: string) => {
-    if (jwt === "valid-jwt") {
-      return { email: "user@example.com" };
-    }
-    throw new Error("invalid");
-  }),
-}));
+vi.mock("../src/access", async () => {
+  const actual = await vi.importActual<typeof import("../src/access")>("../src/access");
+  return {
+    parseAccessAppAuds: actual.parseAccessAppAuds,
+    verifyAccessJwt: vi.fn(async (jwt: string) => {
+      if (jwt === "valid-jwt") {
+        return { email: "user@example.com" };
+      }
+      if (jwt === "service-jwt") {
+        return { common_name: "svc-account.access" };
+      }
+      if (jwt === "neither-jwt") {
+        return {};
+      }
+      throw new Error("invalid");
+    }),
+  };
+});
 
 import worker, { metaKey, writeMeta } from "../src/index";
+import { verifyAccessJwt } from "../src/access";
 
 describe("router fetch", () => {
   beforeEach(() => {
@@ -385,6 +396,199 @@ describe("router fetch", () => {
     const meta = (await env.AUTH_TOKENS.get("meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "json")) as any;
     expect(meta.linked_at).toBeTruthy();
     expect(meta.last_refreshed).toBeTruthy();
+  });
+});
+
+describe("strict per-slug AUD selection", () => {
+  beforeEach(() => {
+    vi.mocked(verifyAccessJwt).mockClear();
+  });
+
+  it("verifies /get-token/<registered slug> against ONLY that slug's token aud", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    await worker.fetch(request, env, {} as any);
+
+    expect(verifyAccessJwt).toHaveBeenCalledWith("valid-jwt", env, ["github-token-aud"]);
+  });
+
+  it("verifies /callback/<registered slug> against ONLY that slug's link aud", async () => {
+    const env = makeEnv();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "bad_verification_code" }), { status: 200 }))
+    );
+    const request = new Request(
+      "https://broker.jsmunro.me/callback/cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc?code=abc",
+      { headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" } }
+    );
+    await worker.fetch(request, env, {} as any);
+    vi.unstubAllGlobals();
+
+    expect(verifyAccessJwt).toHaveBeenCalledWith("valid-jwt", env, ["cloudflare-link-aud"]);
+  });
+
+  it("verifies an unregistered get-token slug against the root ACCESS_AUD, then 404s", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/get-token/nope", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(verifyAccessJwt).toHaveBeenCalledWith("valid-jwt", env, [env.ACCESS_AUD]);
+    expect(res.status).toBe(404);
+  });
+
+  it("verifies dashboard/api routes against the root ACCESS_AUD", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/api/apps", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    await worker.fetch(request, env, {} as any);
+
+    expect(verifyAccessJwt).toHaveBeenCalledWith("valid-jwt", env, [env.ACCESS_AUD]);
+  });
+
+  it("fails closed with 403 (logged) for a manifest-registered slug missing from ACCESS_APP_AUDS, without verifying the JWT", async () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{}" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(403);
+    expect(verifyAccessJwt).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("github/jsmunro/Iv23lifj0i4aV6qYR76i"));
+
+    errorSpy.mockRestore();
+  });
+
+  it("fails closed with 403 for malformed ACCESS_APP_AUDS JSON, never issuing a token", async () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{not json" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as any;
+    expect(body.token).toBeUndefined();
+    expect(verifyAccessJwt).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+
+  it("fails closed with 403 (logged) for a manifest-registered callback slug missing from ACCESS_APP_AUDS, without verifying the JWT", async () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{}" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = new Request(
+      "https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=abc123",
+      { headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" } }
+    );
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(403);
+    expect(verifyAccessJwt).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("github/jsmunro/Iv23lifj0i4aV6qYR76i"));
+
+    errorSpy.mockRestore();
+  });
+
+  it("fails closed with 403 for malformed ACCESS_APP_AUDS JSON on /callback, never running provider code", async () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{not json" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = new Request(
+      "https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=abc123",
+      { headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" } }
+    );
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as any;
+    expect(body.token).toBeUndefined();
+    expect(verifyAccessJwt).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+});
+
+describe("service-token identity resolution", () => {
+  it("callback stores the KV entry under common_name when the JWT has no email", async () => {
+    const env = makeEnv();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({ access_token: "gho_token", refresh_token: "ghr_refresh", expires_in: 28800 }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const request = new Request(
+      "https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=abc123",
+      { headers: { "Cf-Access-Jwt-Assertion": "service-jwt" } }
+    );
+    const res = await worker.fetch(request, env, {} as any);
+    expect(res.status).toBe(200);
+
+    const stored = await env.AUTH_TOKENS.get(
+      "refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:svc-account.access"
+    );
+    expect(stored).toBe("ghr_refresh");
+  });
+
+  it("get-token stores the rotated refresh token under common_name when the service JWT has no email", async () => {
+    const env = makeEnv();
+    await env.AUTH_TOKENS.put(
+      "refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:svc-account.access",
+      "ghr_old"
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({ access_token: "gho_new", expires_in: 28800, refresh_token: "ghr_new" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
+      headers: { "Cf-Access-Jwt-Assertion": "service-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.token).toBe("gho_new");
+    expect(body.expires_in).toBe(28800);
+
+    expect(
+      await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:svc-account.access")
+    ).toBe("ghr_new");
+    expect(
+      await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:svc-account.access@example.com")
+    ).toBeNull();
+  });
+
+  it("returns 403 when the JWT payload has neither email nor common_name", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/api/me", {
+      headers: { "Cf-Access-Jwt-Assertion": "neither-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body).toEqual({ error: "Invalid Access token" });
   });
 });
 

@@ -74,13 +74,40 @@ async function importRsaPublicKey(jwk: Jwk): Promise<CryptoKey> {
 }
 
 /**
+ * Parses `env.ACCESS_APP_AUDS` — the per-slug `{ "<slug>": { "token": "<aud>",
+ * "link": "<aud>" } }` map synced from Terraform. Throws (with a clear
+ * message) on malformed JSON or a non-object top level so callers can fail
+ * closed rather than silently treating a broken config as "no mappings".
+ */
+export function parseAccessAppAuds(env: Env): Record<string, { token: string; link: string }> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(env.ACCESS_APP_AUDS);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`ACCESS_APP_AUDS is not valid JSON: ${message}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("ACCESS_APP_AUDS must be a JSON object");
+  }
+  return parsed as Record<string, { token: string; link: string }>;
+}
+
+/**
  * Verifies a Cloudflare Access JWT: RS256 signature against the team's JWKS,
- * and aud/iss/exp/nbf claim validation. Returns the decoded payload on success.
+ * and aud/iss/exp/nbf claim validation. `expectedAuds` is the STRICT list of
+ * auds this request may present against (per-slug token/link aud, or the
+ * root `ACCESS_AUD` for unregistered slugs and dashboard/`/api/*` routes) —
+ * the JWT's `aud` claim must intersect it. Returns the decoded payload on
+ * success; the payload may carry `email` (user JWTs) or `common_name`
+ * (service-token `non_identity` JWTs) — identity resolution is the caller's
+ * job.
  */
 export async function verifyAccessJwt(
   jwt: string,
-  env: Env
-): Promise<{ email: string; [k: string]: any }> {
+  env: Env,
+  expectedAuds: string[]
+): Promise<{ email?: string; common_name?: string; [k: string]: any }> {
   const parts = jwt.split(".");
   if (parts.length !== 3) {
     throw new Error("Malformed JWT");
@@ -120,6 +147,7 @@ export async function verifyAccessJwt(
 
   const payload = JSON.parse(base64UrlDecodeToString(payloadB64)) as {
     email?: string;
+    common_name?: string;
     aud?: string | string[];
     iss?: string;
     exp?: number;
@@ -128,7 +156,7 @@ export async function verifyAccessJwt(
   };
 
   const aud = Array.isArray(payload.aud) ? payload.aud : payload.aud ? [payload.aud] : [];
-  if (!aud.includes(env.ACCESS_AUD)) {
+  if (!aud.some((a) => expectedAuds.includes(a))) {
     throw new Error("JWT aud mismatch");
   }
 
@@ -145,9 +173,5 @@ export async function verifyAccessJwt(
     throw new Error("JWT not yet valid");
   }
 
-  if (!payload.email) {
-    throw new Error("JWT missing email claim");
-  }
-
-  return payload as { email: string; [k: string]: any };
+  return payload as { email?: string; common_name?: string; [k: string]: any };
 }

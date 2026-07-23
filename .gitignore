@@ -3,3 +3,12 @@ node_modules/
 .wrangler/
 .dev.vars
 
+# Terraform (infra/)
+infra/backend.hcl
+*.tfstate
+*.tfstate.*
+.terraform/
+*.auto.tfvars
+terraform.tfvars
+
+infra/tfplan

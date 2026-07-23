@@ -46,6 +46,10 @@ export function makeEnv(overrides: Partial<Env> = {}): Env {
     BROKER_URL: "https://broker.jsmunro.me",
     ACCESS_TEAM_DOMAIN: "jsmunro.cloudflareaccess.com",
     ACCESS_AUD: "test-aud",
+    ACCESS_APP_AUDS: JSON.stringify({
+      "github/jsmunro/Iv23lifj0i4aV6qYR76i": { token: "github-token-aud", link: "github-link-aud" },
+      "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc": { token: "cloudflare-token-aud", link: "cloudflare-link-aud" },
+    }),
     ENVIRONMENT: "test",
     ...overrides,
   };

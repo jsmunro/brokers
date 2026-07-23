@@ -1,17 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeEnv } from "./helpers";
 
-vi.mock("../src/access", () => ({
-  verifyAccessJwt: vi.fn(async (jwt: string) => {
-    if (jwt === "valid-jwt") {
-      return { email: "user@example.com", exp: 1234567890 };
-    }
-    if (jwt === "valid-jwt-with-name") {
-      return { email: "user@example.com", exp: 1234567890, name: "Jane Doe", idp: { type: "github" } };
-    }
-    throw new Error("invalid");
-  }),
-}));
+vi.mock("../src/access", async () => {
+  const actual = await vi.importActual<typeof import("../src/access")>("../src/access");
+  return {
+    parseAccessAppAuds: actual.parseAccessAppAuds,
+    verifyAccessJwt: vi.fn(async (jwt: string) => {
+      if (jwt === "valid-jwt") {
+        return { email: "user@example.com", exp: 1234567890 };
+      }
+      if (jwt === "valid-jwt-with-name") {
+        return { email: "user@example.com", exp: 1234567890, name: "Jane Doe", idp: { type: "github" } };
+      }
+      if (jwt === "service-jwt") {
+        return { common_name: "svc-account.access" };
+      }
+      throw new Error("invalid");
+    }),
+  };
+});
 
 import worker from "../src/index";
 
@@ -166,6 +173,24 @@ describe("GET /api/me", () => {
     const request = new Request("https://broker.jsmunro.me/api/me");
     const res = await worker.fetch(request, env, {} as any);
     expect(res.status).toBe(401);
+  });
+
+  it("returns { email: common_name, service: true } for a service-token principal, with no device fetch", async () => {
+    const env = makeEnv();
+    const fetchMock = vi.fn(async () => {
+      throw new Error("get-identity must not be called for a service principal");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request = new Request("https://broker.jsmunro.me/api/me", {
+      headers: { "Cf-Access-Jwt-Assertion": "service-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ email: "svc-account.access", service: true });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -492,6 +517,13 @@ describe("GET /api/apps", () => {
       org: "jsmunro",
       client_id: "Iv23lifj0i4aV6qYR76i",
       display_name: "Brokers repo",
+      scopes: "installation-defined",
+      access: {
+        groups: ["org-members"],
+        token_aud: "github-token-aud",
+        link_aud: "github-link-aud",
+        service_token: true,
+      },
     });
 
     const cloudflare = body.find((e) => e.slug === "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
@@ -501,7 +533,45 @@ describe("GET /api/apps", () => {
       org: "jackm",
       client_id: "9f2c965eeb2fcc390fc3843935de35bc",
       display_name: "central-auth-broker",
+      scopes: "var:CLOUDFLARE_OAUTH_SCOPES",
+      access: {
+        groups: ["org-members"],
+        token_aud: "cloudflare-token-aud",
+        link_aud: "cloudflare-link-aud",
+        service_token: false,
+      },
     });
+  });
+
+  it("omits token_aud/link_aud when ACCESS_APP_AUDS has no mapping for the slug", async () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{}" });
+    const request = new Request("https://broker.jsmunro.me/api/apps", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    const body = (await res.json()) as any[];
+
+    const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
+    expect(github.access).toEqual({ groups: ["org-members"], service_token: true });
+    expect(github.access.token_aud).toBeUndefined();
+    expect(github.access.link_aud).toBeUndefined();
+  });
+
+  it("omits token_aud/link_aud (logged) rather than failing when ACCESS_APP_AUDS is malformed", async () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{not json" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = new Request("https://broker.jsmunro.me/api/apps", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any[];
+    const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
+    expect(github.access.token_aud).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
   });
 
   it("includes metadata from the KV cache when present", async () => {
@@ -519,9 +589,36 @@ describe("GET /api/apps", () => {
 
     const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
     expect(github.metadata).toEqual({ name: "Brokers App", fetched_at: "2026-01-01T00:00:00.000Z" });
+    // No cached permissions object yet -> scopes falls back to the declared value.
+    expect(github.scopes).toBe("installation-defined");
 
     const cloudflare = body.find((e) => e.slug === "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
     expect(cloudflare.metadata).toBeUndefined();
+  });
+
+  it("resolves scopes to the cached metadata.permissions object when source is metadata.permissions", async () => {
+    const env = makeEnv();
+    await env.AUTH_TOKENS.put(
+      "app:github/jsmunro/Iv23lifj0i4aV6qYR76i",
+      JSON.stringify({
+        name: "Brokers App",
+        fetched_at: "2026-01-01T00:00:00.000Z",
+        permissions: { contents: "read", issues: "write" },
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/api/apps", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    const body = (await res.json()) as any[];
+
+    const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
+    expect(github.scopes).toEqual({ contents: "read", issues: "write" });
+
+    // Cloudflare has no metadata.permissions source -> unaffected, still the declared string.
+    const cloudflare = body.find((e) => e.slug === "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
+    expect(cloudflare.scopes).toBe("var:CLOUDFLARE_OAUTH_SCOPES");
   });
 
   it("401 when unauthenticated", async () => {
@@ -591,6 +688,41 @@ describe("dashboard card rendering (inline client script)", () => {
     const out = render({ slug: "github/jsmunro/Iv23lifj0i4aV6qYR76i", linked: false, auth_url: "https://x" });
 
     expect(out).toContain(">github/jsmunro/Iv23lifj0i4aV6qYR76i ");
+  });
+
+  it("shows a scopes summary and required groups, escaped, when present", async () => {
+    const render = await fetchRenderLinkCard();
+    const out = render({
+      slug: "github/jsmunro/Iv23lifj0i4aV6qYR76i",
+      linked: true,
+      display_name: "Brokers repo",
+      scopes: { contents: "read", "issues<script>": "write" },
+      access: { groups: ["org-members", "<b>admins</b>"], service_token: true },
+    });
+
+    expect(out).toContain("Scopes:");
+    expect(out).toContain("contents:read");
+    // The scopes object key is HTML-escaped, never raw markup.
+    expect(out).toContain("issues&lt;script&gt;:write");
+    expect(out).not.toContain("<script>");
+
+    expect(out).toContain("Required groups:");
+    expect(out).toContain("org-members");
+    expect(out).toContain("&lt;b&gt;admins&lt;/b&gt;");
+    expect(out).not.toContain("<b>admins</b>");
+  });
+
+  it("renders no scopes/groups rows when absent", async () => {
+    const render = await fetchRenderLinkCard();
+    const out = render({
+      slug: "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc",
+      linked: false,
+      display_name: "central-auth-broker",
+      auth_url: "https://x",
+    });
+
+    expect(out).not.toContain("Scopes:");
+    expect(out).not.toContain("Required groups:");
   });
 });
 

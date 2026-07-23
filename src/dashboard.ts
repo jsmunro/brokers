@@ -1,6 +1,7 @@
-import type { AppConfig, AuthProvider, Env, LinkMeta } from "./types";
+import type { AppConfig, AppMetadata, AuthProvider, Env, LinkMeta } from "./types";
 import { appConfigs } from "./registry";
 import { getCachedAppMetadata } from "./appauth";
+import { parseAccessAppAuds } from "./access";
 
 const KV_PREFIX = "refresh:";
 const META_PREFIX = "meta:";
@@ -148,10 +149,23 @@ function curateDevice(identity: Record<string, unknown> | null): DeviceInfo | un
   return device;
 }
 
-/** `GET /api/me` — reflects the verified Access JWT claims, plus best-effort device/session enrichment. */
+/**
+ * `GET /api/me` — reflects the verified Access JWT claims, plus best-effort
+ * device/session enrichment. For a service-token (`non_identity`) principal
+ * — no `email`, only `common_name` — the dashboard is human-oriented so this
+ * returns just `{ email: common_name, service: true }` with NO device
+ * section fetch (there's no browser session to enrich).
+ */
 export async function handleMe(payload: Record<string, unknown>, request: Request, env: Env): Promise<Response> {
+  const email = payload.email as string | undefined;
+  const commonName = payload.common_name as string | undefined;
+
+  if (!email && commonName) {
+    return jsonResponse({ email: commonName, service: true });
+  }
+
   const body: { email: string; exp?: number; name?: string; idp?: string; device?: DeviceInfo } = {
-    email: payload.email as string,
+    email: email as string,
   };
 
   if (typeof payload.exp === "number") {
@@ -207,19 +221,52 @@ export async function handleLinks(
 }
 
 /**
+ * Resolves the `scopes` value reported by `/api/apps` for a single app: the
+ * manifest-declared value, unless `scopes.source` is `"metadata.permissions"`
+ * and cached metadata has a `permissions` object — in which case that
+ * resolved object is reported instead (Task 2 adds `access.token_aud`/`link_aud`).
+ */
+function resolveScopes(
+  config: AppConfig,
+  metadata: AppMetadata | null
+): string | string[] | Record<string, string> | undefined {
+  if (!config.scopes) {
+    return undefined;
+  }
+  if (config.scopes.source === "metadata.permissions" && metadata?.permissions) {
+    return metadata.permissions;
+  }
+  return config.scopes.declared;
+}
+
+/**
  * `GET /api/apps` — one entry per registered app: `{ slug, provider, org,
- * client_id, display_name, metadata? }`, `metadata` populated from the KV
- * cache when present. This is the name→slug resolution source for the CLI
- * and dashboard.
+ * client_id, display_name, metadata?, scopes?, access? }`, `metadata`
+ * populated from the KV cache when present, `scopes`/`access` derived from
+ * the manifest. `access.token_aud`/`link_aud` are included only when
+ * `ACCESS_APP_AUDS` maps the slug (informational only — malformed
+ * `ACCESS_APP_AUDS` here just means the fields are omitted, since this is a
+ * read-only listing endpoint, not the fail-closed security boundary that
+ * `/get-token`/`/callback` are). This is the name→slug resolution source for
+ * the CLI and dashboard.
  */
 export async function handleApps(
   env: Env,
   configs: Record<string, AppConfig> = appConfigs
 ): Promise<Response> {
+  let auds: Record<string, { token: string; link: string }> = {};
+  try {
+    auds = parseAccessAppAuds(env);
+  } catch (err) {
+    console.error("handleApps: ACCESS_APP_AUDS is malformed; omitting token_aud/link_aud", err);
+  }
+
   const entries = await Promise.all(
     Object.values(configs).map(async (config) => {
       const [provider, org, client_id] = config.slug.split("/");
       const metadata = await getCachedAppMetadata(env, config.slug);
+      const scopes = resolveScopes(config, metadata);
+      const mapped = auds[config.slug];
       return {
         slug: config.slug,
         provider,
@@ -227,6 +274,17 @@ export async function handleApps(
         client_id,
         display_name: config.displayName,
         ...(metadata ? { metadata } : {}),
+        ...(scopes !== undefined ? { scopes } : {}),
+        ...(config.access
+          ? {
+              access: {
+                groups: config.access.groups,
+                ...(mapped?.token ? { token_aud: mapped.token } : {}),
+                ...(mapped?.link ? { link_aud: mapped.link } : {}),
+                service_token: config.access.serviceToken,
+              },
+            }
+          : {}),
       };
     })
   );
@@ -445,6 +503,23 @@ async function loadIdentity() {
 }
 
 function renderLinkCard(entry) {
+  function summarizeScopes(scopes) {
+    if (scopes === undefined || scopes === null) {
+      return "";
+    }
+    if (Array.isArray(scopes)) {
+      return scopes.join(", ");
+    }
+    if (typeof scopes === "object") {
+      return Object.keys(scopes)
+        .map(function (key) {
+          return key + ":" + scopes[key];
+        })
+        .join(", ");
+    }
+    return String(scopes);
+  }
+
   const badgeClass = entry.linked ? "linked" : "unlinked";
   const badgeText = entry.linked ? "Linked" : "Not linked";
   const title = (entry.metadata && entry.metadata.name) || entry.display_name || entry.slug;
@@ -459,6 +534,16 @@ function renderLinkCard(entry) {
   }
   if (entry.last_refreshed) {
     rows += '<div class="row"><span class="k">Last refreshed:</span> ' + esc(new Date(entry.last_refreshed).toLocaleString()) + '</div>';
+  }
+  const scopesSummary = summarizeScopes(entry.scopes);
+  if (scopesSummary) {
+    rows += '<div class="row"><span class="k">Scopes:</span> ' + esc(scopesSummary) + '</div>';
+  }
+  if (entry.access && Array.isArray(entry.access.groups) && entry.access.groups.length > 0) {
+    rows +=
+      '<div class="row"><span class="k">Required groups:</span> ' +
+      esc(entry.access.groups.join(", ")) +
+      '</div>';
   }
 
   let action;
@@ -488,7 +573,12 @@ async function loadLinks() {
   });
   const merged = links.map(function (entry) {
     const app = appsBySlug[entry.slug] || {};
-    return Object.assign({}, entry, { display_name: app.display_name, metadata: app.metadata });
+    return Object.assign({}, entry, {
+      display_name: app.display_name,
+      metadata: app.metadata,
+      scopes: app.scopes,
+      access: app.access,
+    });
   });
 
   const container = document.getElementById("links");
