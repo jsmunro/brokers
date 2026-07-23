@@ -46,6 +46,12 @@ locals {
   apps = {
     for a in local.apps_raw : a.slug => merge(a, {
       # Terraform resource-name-safe key: lowercase, "/" and "." -> "-".
+      # NOTE: two distinct slugs that differ only by case or by "/"/"." can
+      # sanitize to the same key (e.g. "Foo/Bar" and "foo.bar" both ->
+      # "foo-bar"), which would collide in this map and in the Cloudflare
+      # resource names below. Theoretically possible, not currently
+      # validated here or in scripts/validate-manifest.mjs — keep slugs
+      # visually distinct until this is enforced.
       key = lower(replace(a.slug, "/[/.]/", "-"))
 
       allow_groups     = try(a.access.allow_groups, local.defaults.access.allow_groups)
@@ -60,11 +66,13 @@ locals {
   }
 
   # Per-app compiled `require` device_posture id list for the linking app:
-  # the built-in "warp" check (if require_warp) plus any explicit posture
-  # integration ids (require_posture).
+  # the account-scoped cloudflare_device_posture_rule.warp id (if
+  # require_warp) plus any explicit posture-integration rule ids
+  # (require_posture), passed through verbatim — device_posture entries
+  # must be real posture-integration rule ids, not the literal "warp".
   link_require_posture = {
     for k, v in local.apps : k => concat(
-      try(v.link_policy.require_warp, false) ? ["warp"] : [],
+      try(v.link_policy.require_warp, false) ? [cloudflare_zero_trust_device_posture_rule.warp.id] : [],
       try(v.link_policy.require_posture, [])
     )
   }

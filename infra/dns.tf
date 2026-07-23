@@ -13,5 +13,5 @@ resource "cloudflare_record" "broker" {
 
 import {
   to = cloudflare_record.broker
-  id = "zone/${var.zone_id}/${var.dns_record_id}"
+  id = "${var.zone_id}/${var.dns_record_id}"
 }

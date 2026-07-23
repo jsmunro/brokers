@@ -123,15 +123,49 @@ resource "cloudflare_zero_trust_access_policy" "link_allow" {
     group = [for g in each.value.allow_groups : cloudflare_zero_trust_access_group.this[g].id]
   }
 
-  # require_warp -> Cloudflare's built-in WARP-client device posture check id
-  # ("warp"), no external device-posture integration needed for this one.
+  # require_warp -> the id of the account-scoped `warp` device_posture_rule
+  # defined below (device_posture entries must be real posture-integration
+  # rule ids, not the literal string "warp").
   # require_posture -> device-posture integration ids configured elsewhere
-  # (e.g. Crowdstrike, Tanium); empty by default (manifest defaults).
+  # (e.g. Crowdstrike, Tanium); empty by default (manifest defaults), passed
+  # through verbatim.
   dynamic "require" {
     for_each = length(local.link_require_posture[each.key]) > 0 ? [local.link_require_posture[each.key]] : []
     content {
       device_posture = require.value
     }
+  }
+}
+
+############################################
+# WARP-client device posture check, referenced by link_require_posture
+# (infra/main.tf) wherever a manifest app sets link_policy.require_warp.
+# One account-scoped rule shared by all apps that require it.
+############################################
+
+resource "cloudflare_zero_trust_device_posture_rule" "warp" {
+  account_id  = var.account_id
+  name        = "broker WARP check"
+  description = "Requires the Cloudflare WARP client to be connected."
+  type        = "warp"
+
+  match {
+    platform = "windows"
+  }
+  match {
+    platform = "mac"
+  }
+  match {
+    platform = "linux"
+  }
+  match {
+    platform = "android"
+  }
+  match {
+    platform = "ios"
+  }
+  match {
+    platform = "chromeos"
   }
 }
 
