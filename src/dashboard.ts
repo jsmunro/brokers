@@ -1,11 +1,6 @@
-import type { AuthProvider, Env, LinkMeta } from "./types";
-import { GitHubProvider } from "./providers/github";
-import { CloudflareProvider } from "./providers/cloudflare";
-
-// Slugs only, for the server-rendered page skeleton (Task 2's `renderDashboardPage()`
-// takes no arguments per the interface contract). The live registry used for routing
-// and KV lookups is passed into `handleLinks`/`handleUnlink` by the caller in index.ts.
-const DASHBOARD_PROVIDER_SLUGS: string[] = [new GitHubProvider().slug, new CloudflareProvider().slug];
+import type { AppConfig, AuthProvider, Env, LinkMeta } from "./types";
+import { appConfigs } from "./registry";
+import { getCachedAppMetadata } from "./appauth";
 
 const KV_PREFIX = "refresh:";
 const META_PREFIX = "meta:";
@@ -211,6 +206,34 @@ export async function handleLinks(
   return jsonResponse(entries);
 }
 
+/**
+ * `GET /api/apps` — one entry per registered app: `{ slug, provider, org,
+ * client_id, display_name, metadata? }`, `metadata` populated from the KV
+ * cache when present. This is the name→slug resolution source for the CLI
+ * and dashboard.
+ */
+export async function handleApps(
+  env: Env,
+  configs: Record<string, AppConfig> = appConfigs
+): Promise<Response> {
+  const entries = await Promise.all(
+    Object.values(configs).map(async (config) => {
+      const [provider, org, client_id] = config.slug.split("/");
+      const metadata = await getCachedAppMetadata(env, config.slug);
+      return {
+        slug: config.slug,
+        provider,
+        org,
+        client_id,
+        display_name: config.displayName,
+        ...(metadata ? { metadata } : {}),
+      };
+    })
+  );
+
+  return jsonResponse(entries);
+}
+
 /** `DELETE /api/links/<provider>` — deletes both the refresh and meta KV keys. */
 export async function handleUnlink(
   env: Env,
@@ -228,17 +251,18 @@ export async function handleUnlink(
   return jsonResponse({ ok: true });
 }
 
-function skeletonCardHtml(slug: string): string {
+function skeletonCardHtml(config: AppConfig): string {
   return (
-    `<div class="card" data-provider="${esc(slug)}" data-skeleton="true">` +
-    `<h2>${esc(slug)} <span class="badge unlinked">...</span></h2>` +
+    `<div class="card" data-provider="${esc(config.slug)}" data-skeleton="true">` +
+    `<h2>${esc(config.displayName)} <span class="badge unlinked">...</span></h2>` +
+    `<div class="muted">${esc(config.slug)}</div>` +
     `</div>`
   );
 }
 
 /** `GET /` — server-rendered dashboard page. Provider skeleton cards are baked in at render time; the client script fills in live state. */
 export function renderDashboardPage(): Response {
-  const skeletonCards = DASHBOARD_PROVIDER_SLUGS.map(skeletonCardHtml).join("\n  ");
+  const skeletonCards = Object.values(appConfigs).map(skeletonCardHtml).join("\n  ");
 
   const html = `<!doctype html>
 <html lang="en">
@@ -423,6 +447,7 @@ async function loadIdentity() {
 function renderLinkCard(entry) {
   const badgeClass = entry.linked ? "linked" : "unlinked";
   const badgeText = entry.linked ? "Linked" : "Not linked";
+  const title = (entry.metadata && entry.metadata.name) || entry.display_name || entry.slug;
   let rows = "";
   if (entry.details) {
     for (const key of Object.keys(entry.details)) {
@@ -445,7 +470,8 @@ function renderLinkCard(entry) {
 
   return (
     '<div class="card" data-provider="' + esc(entry.slug) + '">' +
-    '<h2>' + esc(entry.slug) + ' <span class="badge ' + badgeClass + '">' + badgeText + '</span></h2>' +
+    '<h2>' + esc(title) + ' <span class="badge ' + badgeClass + '">' + badgeText + '</span></h2>' +
+    '<div class="muted">' + esc(entry.slug) + '</div>' +
     rows +
     '<div class="actions">' + action + '</div>' +
     '</div>'
@@ -453,10 +479,20 @@ function renderLinkCard(entry) {
 }
 
 async function loadLinks() {
-  const res = await fetch("/api/links");
-  const links = await res.json();
+  const [linksRes, appsRes] = await Promise.all([fetch("/api/links"), fetch("/api/apps")]);
+  const links = await linksRes.json();
+  const apps = await appsRes.json();
+  const appsBySlug = {};
+  apps.forEach(function (app) {
+    appsBySlug[app.slug] = app;
+  });
+  const merged = links.map(function (entry) {
+    const app = appsBySlug[entry.slug] || {};
+    return Object.assign({}, entry, { display_name: app.display_name, metadata: app.metadata });
+  });
+
   const container = document.getElementById("links");
-  container.innerHTML = links.map(renderLinkCard).join("");
+  container.innerHTML = merged.map(renderLinkCard).join("");
   document.getElementById("loading").style.display = "none";
 
   container.querySelectorAll("button.unlink").forEach(function (btn) {

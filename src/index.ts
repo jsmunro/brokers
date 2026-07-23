@@ -1,13 +1,8 @@
 import type { AuthProvider, Env, LinkMeta } from "./types";
 import { verifyAccessJwt } from "./access";
-import { GitHubProvider } from "./providers/github";
-import { CloudflareProvider } from "./providers/cloudflare";
-import { renderDashboardPage, handleMe, handleLinks, handleUnlink } from "./dashboard";
-
-const providers: Record<string, AuthProvider> = {
-  github: new GitHubProvider(),
-  cloudflare: new CloudflareProvider(),
-};
+import { apps as providers, appConfigs } from "./registry";
+import { renderDashboardPage, handleMe, handleLinks, handleUnlink, handleApps } from "./dashboard";
+import { refreshAppMetadataCache } from "./appauth";
 
 const KV_PREFIX = "refresh:";
 const META_PREFIX = "meta:";
@@ -16,7 +11,7 @@ function kvKey(provider: string, userId: string): string {
   return `${KV_PREFIX}${provider}:${userId}`;
 }
 
-/** KV key for a provider link's metadata. Exported for the dashboard layer (Task 2). */
+/** KV key for a provider link's metadata. Exported for the dashboard layer. */
 export function metaKey(provider: string, userId: string): string {
   return `${META_PREFIX}${provider}:${userId}`;
 }
@@ -147,7 +142,7 @@ export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const segments = url.pathname.split("/").filter(Boolean);
-    const [action, providerSlug] = segments;
+    const [action, ...rest] = segments;
 
     const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
     if (!accessJwt) {
@@ -175,8 +170,13 @@ export default {
       return handleLinks(env, userId, providers);
     }
 
-    if (action === "api" && segments[1] === "links" && segments.length === 3 && request.method === "DELETE") {
-      return handleUnlink(env, userId, providers, segments[2]!);
+    if (action === "api" && segments[1] === "links" && segments.length >= 3 && request.method === "DELETE") {
+      const slug = segments.slice(2).join("/");
+      return handleUnlink(env, userId, providers, slug);
+    }
+
+    if (action === "api" && segments[1] === "apps" && segments.length === 2 && request.method === "GET") {
+      return handleApps(env, appConfigs);
     }
 
     if (action !== "get-token" && action !== "callback") {
@@ -186,8 +186,10 @@ export default {
       });
     }
 
+    const providerSlug = rest.join("/");
+
     if (!providerSlug || !providers[providerSlug]) {
-      return jsonResponse({ error: `Unsupported provider: ${providerSlug ?? ""}` }, 404);
+      return jsonResponse({ error: `Unsupported provider: ${providerSlug}` }, 404);
     }
 
     const provider = providers[providerSlug]!;
@@ -224,6 +226,18 @@ export default {
         await touchMeta(env, provider.slug, userId);
       } catch (err) {
         console.error(`scheduled: failed to refresh ${key.name}`, err);
+      }
+    }
+
+    // Metadata refresh runs after the token refresh loop; a failure fetching
+    // one app's metadata must never affect another app's metadata refresh or
+    // the token refresh loop above (refreshAppMetadataCache never throws,
+    // but the try/catch here keeps that isolation explicit and future-proof).
+    for (const config of Object.values(appConfigs)) {
+      try {
+        await refreshAppMetadataCache(config, env);
+      } catch (err) {
+        console.error(`scheduled: failed to refresh metadata for ${config.slug}`, err);
       }
     }
   },

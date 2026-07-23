@@ -1,27 +1,51 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GitHubProvider } from "../src/providers/github";
+import { apps, GITHUB_SLUG } from "../src/registry";
+import { providerContractTests } from "./contract";
 import { makeEnv } from "./helpers";
 
-describe("GitHubProvider", () => {
+const provider = apps[GITHUB_SLUG]!;
+const CALLBACK_URL = `https://broker.jsmunro.me/callback/${GITHUB_SLUG}?code=abc123`;
+
+describe("GitHub app (factory-built)", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("builds the authorize URL with client_id, redirect_uri, and state", () => {
+  providerContractTests("github", () => apps[GITHUB_SLUG]!, {
+    env: makeEnv(),
+    authorizeUrl: "https://github.com/login/oauth/authorize",
+    callbackRequestUrl: CALLBACK_URL,
+    tokenExchangeResponse: {
+      access_token: "gho_token",
+      refresh_token: "ghr_refresh",
+      expires_in: 28800,
+      refresh_token_expires_in: 15897600,
+      token_type: "bearer",
+    },
+    expectedRefreshToken: "ghr_refresh",
+    expectedAccessToken: "gho_token",
+    refreshResponse: {
+      access_token: "gho_new",
+      expires_in: 28800,
+      refresh_token: "ghr_new",
+      refresh_token_expires_in: 15897600,
+    },
+    expectedRefreshedToken: "gho_new",
+  });
+
+  it("builds the authorize URL with client_id, redirect_uri (3-part), and state", () => {
     const env = makeEnv();
-    const provider = new GitHubProvider();
     const authUrl = provider.getAuthUrl(env, "user@example.com");
     const url = new URL(authUrl);
 
     expect(url.origin + url.pathname).toBe("https://github.com/login/oauth/authorize");
     expect(url.searchParams.get("client_id")).toBe("Iv23test");
-    expect(url.searchParams.get("redirect_uri")).toBe("https://broker.jsmunro.me/callback/github");
+    expect(url.searchParams.get("redirect_uri")).toBe(`https://broker.jsmunro.me/callback/${GITHUB_SLUG}`);
     expect(url.searchParams.get("state")).toBeTruthy();
   });
 
   it("handleCallback POSTs the correct params and returns the refresh token", async () => {
     const env = makeEnv();
-    const provider = new GitHubProvider();
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(input.toString()).toBe("https://github.com/login/oauth/access_token");
@@ -33,7 +57,7 @@ describe("GitHubProvider", () => {
       expect(body.get("client_id")).toBe("Iv23test");
       expect(body.get("client_secret")).toBe("test-secret");
       expect(body.get("code")).toBe("abc123");
-      expect(body.get("redirect_uri")).toBe("https://broker.jsmunro.me/callback/github");
+      expect(body.get("redirect_uri")).toBe(`https://broker.jsmunro.me/callback/${GITHUB_SLUG}`);
 
       return new Response(
         JSON.stringify({
@@ -48,7 +72,7 @@ describe("GitHubProvider", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const request = new Request("https://broker.jsmunro.me/callback/github?code=abc123");
+    const request = new Request(CALLBACK_URL);
     const result = await provider.handleCallback(request, env);
 
     expect(result.refreshToken).toBe("ghr_refresh");
@@ -58,7 +82,6 @@ describe("GitHubProvider", () => {
 
   it("handleCallback throws when GitHub returns an error", async () => {
     const env = makeEnv();
-    const provider = new GitHubProvider();
 
     vi.stubGlobal(
       "fetch",
@@ -70,13 +93,12 @@ describe("GitHubProvider", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/callback/github?code=bad");
+    const request = new Request(CALLBACK_URL);
     await expect(provider.handleCallback(request, env)).rejects.toThrow("The code is invalid");
   });
 
   it("handleCallback throws when refresh_token is missing", async () => {
     const env = makeEnv();
-    const provider = new GitHubProvider();
 
     vi.stubGlobal(
       "fetch",
@@ -88,13 +110,12 @@ describe("GitHubProvider", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/callback/github?code=abc123");
+    const request = new Request(CALLBACK_URL);
     await expect(provider.handleCallback(request, env)).rejects.toThrow(/refresh_token/);
   });
 
   it("refreshToken POSTs grant_type=refresh_token and returns rotated token", async () => {
     const env = makeEnv();
-    const provider = new GitHubProvider();
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(input.toString()).toBe("https://github.com/login/oauth/access_token");
@@ -127,7 +148,6 @@ describe("GitHubProvider", () => {
 
   it("refreshToken throws on GitHub error response", async () => {
     const env = makeEnv();
-    const provider = new GitHubProvider();
 
     vi.stubGlobal(
       "fetch",
@@ -145,7 +165,6 @@ describe("GitHubProvider", () => {
   describe("describeLink", () => {
     it("calls GitHub /user with bearer auth and returns login/name/id as strings", async () => {
       const env = makeEnv();
-      const provider = new GitHubProvider();
 
       const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         expect(input.toString()).toBe("https://api.github.com/user");
@@ -167,7 +186,6 @@ describe("GitHubProvider", () => {
 
     it("omits a null name field", async () => {
       const env = makeEnv();
-      const provider = new GitHubProvider();
 
       vi.stubGlobal(
         "fetch",
@@ -186,7 +204,6 @@ describe("GitHubProvider", () => {
 
     it("throws on a non-2xx response", async () => {
       const env = makeEnv();
-      const provider = new GitHubProvider();
 
       vi.stubGlobal(
         "fetch",

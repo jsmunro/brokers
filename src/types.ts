@@ -2,6 +2,8 @@ export interface Env {
   AUTH_TOKENS: KVNamespace;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
+  GITHUB_APP_ID: string;
+  GITHUB_APP_PRIVATE_KEY: string;
   CLOUDFLARE_OAUTH_CLIENT_ID: string;
   CLOUDFLARE_OAUTH_CLIENT_SECRET: string;
   CLOUDFLARE_OAUTH_SCOPES: string;
@@ -33,4 +35,45 @@ export interface LinkMeta {
   linked_at: string;
   last_refreshed?: string;
   details?: Record<string, string>;
+}
+
+/**
+ * Optional app-level auth used to fetch curated app metadata (e.g. a GitHub
+ * App's name/description/permissions), separate from the per-user OAuth2
+ * token flow. A discriminated union — the extension point for future kinds
+ * (e.g. `okta-private-key-jwt`).
+ */
+export type AppAuthConfig = {
+  kind: "github-app-jwt";
+  /** Name of the `Env` var holding the numeric GitHub App id. */
+  appIdVar: string;
+  /** Name of the `Env` var holding the PKCS#8 PEM private key. */
+  privateKeyVar: string;
+};
+
+/**
+ * Curated app metadata fetched via `appAuth`. Never the raw provider blob —
+ * only these documented fields are surfaced.
+ */
+export interface AppMetadata {
+  name?: string;
+  description?: string;
+  owner?: string;
+  permissions?: Record<string, string>;
+  events?: string[];
+  html_url?: string;
+  fetched_at: string;
+}
+
+/**
+ * A single app registration in the registry, keyed by its full slug
+ * `<provider>/<org>/<clientid>`. `provider` is normally built via
+ * `oauth2Provider(...)` but may be any `AuthProvider` implementation.
+ */
+export interface AppConfig {
+  slug: string;
+  displayName: string;
+  provider: AuthProvider;
+  /** Optional app-level auth for fetching curated metadata. */
+  appAuth?: AppAuthConfig;
 }

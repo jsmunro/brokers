@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { makeEnv, makeKvStub } from "./helpers";
+import { makeEnv, makeKvStub, exportPrivateKeyAsPkcs8Pem, generateTestKeyPair } from "./helpers";
 
 vi.mock("../src/access", () => ({
   verifyAccessJwt: vi.fn(async (jwt: string) => {
@@ -19,7 +19,7 @@ describe("router fetch", () => {
 
   it("returns 401 JSON when the Access header is missing", async () => {
     const env = makeEnv();
-    const request = new Request("https://broker.jsmunro.me/get-token/github");
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i");
     const res = await worker.fetch(request, env, {} as any);
 
     expect(res.status).toBe(401);
@@ -29,7 +29,7 @@ describe("router fetch", () => {
 
   it("returns 403 JSON when the Access JWT is invalid", async () => {
     const env = makeEnv();
-    const request = new Request("https://broker.jsmunro.me/get-token/github", {
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
       headers: { "Cf-Access-Jwt-Assertion": "bad-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
@@ -61,6 +61,18 @@ describe("router fetch", () => {
     expect(body).toEqual({ error: "Unsupported provider: nope" });
   });
 
+  it("returns 404 JSON for an unsupported provider with a full 3-part slug", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/get-token/github/unknown-org/xyz", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body).toEqual({ error: "Unsupported provider: github/unknown-org/xyz" });
+  });
+
   it("returns 404 text for an unknown action", async () => {
     const env = makeEnv();
     const request = new Request("https://broker.jsmunro.me/frobnicate/github", {
@@ -75,7 +87,7 @@ describe("router fetch", () => {
 
   it("get-token returns setup_required when no refresh token is stored", async () => {
     const env = makeEnv();
-    const request = new Request("https://broker.jsmunro.me/get-token/github", {
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
@@ -102,16 +114,16 @@ describe("router fetch", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/callback/github?code=abc123", {
+    const request = new Request("https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=abc123", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
 
     expect(res.status).toBe(200);
     const text = await res.text();
-    expect(text).toContain("GITHUB Linked!");
+    expect(text).toContain("GITHUB/JSMUNRO/IV23LIFJ0I4AV6QYR76I Linked!");
 
-    const stored = await env.AUTH_TOKENS.get("refresh:github:user@example.com");
+    const stored = await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com");
     expect(stored).toBe("ghr_refresh");
   });
 
@@ -127,7 +139,7 @@ describe("router fetch", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/callback/github?code=bad", {
+    const request = new Request("https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=bad", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
@@ -139,7 +151,7 @@ describe("router fetch", () => {
 
   it("get-token refresh happy path returns token and persists rotated refresh token", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_old");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "ghr_old");
 
     vi.stubGlobal(
       "fetch",
@@ -155,7 +167,7 @@ describe("router fetch", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/get-token/github", {
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
@@ -165,13 +177,13 @@ describe("router fetch", () => {
     expect(body.token).toBe("gho_new");
     expect(body.expires_in).toBe(28800);
 
-    const stored = await env.AUTH_TOKENS.get("refresh:github:user@example.com");
+    const stored = await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com");
     expect(stored).toBe("ghr_new");
   });
 
   it("get-token refresh failure clears the KV entry and returns setup_required", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_old");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "ghr_old");
 
     vi.stubGlobal(
       "fetch",
@@ -183,7 +195,7 @@ describe("router fetch", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/get-token/github", {
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
@@ -192,15 +204,15 @@ describe("router fetch", () => {
     const body = (await res.json()) as any;
     expect(body.setup_required).toBe(true);
 
-    const stored = await env.AUTH_TOKENS.get("refresh:github:user@example.com");
+    const stored = await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com");
     expect(stored).toBeNull();
   });
 
   it("get-token refresh failure deletes both the refresh key and the meta key", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_old");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "ghr_old");
     await env.AUTH_TOKENS.put(
-      "meta:github:user@example.com",
+      "meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com",
       JSON.stringify({ linked_at: "2026-01-01T00:00:00.000Z" })
     );
 
@@ -214,14 +226,14 @@ describe("router fetch", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/get-token/github", {
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
 
     expect(res.status).toBe(200);
-    expect(await env.AUTH_TOKENS.get("refresh:github:user@example.com")).toBeNull();
-    expect(await env.AUTH_TOKENS.get("meta:github:user@example.com")).toBeNull();
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com")).toBeNull();
+    expect(await env.AUTH_TOKENS.get("meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com")).toBeNull();
   });
 
   it("callback success writes meta with linked_at and details when describeLink succeeds", async () => {
@@ -246,13 +258,13 @@ describe("router fetch", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/callback/github?code=abc123", {
+    const request = new Request("https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=abc123", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
     expect(res.status).toBe(200);
 
-    const meta = (await env.AUTH_TOKENS.get("meta:github:user@example.com", "json")) as any;
+    const meta = (await env.AUTH_TOKENS.get("meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "json")) as any;
     expect(meta.linked_at).toBeTruthy();
     expect(meta.details).toEqual({ login: "octocat", id: "123", name: "Mona Lisa" });
   });
@@ -277,15 +289,15 @@ describe("router fetch", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/callback/github?code=abc123", {
+    const request = new Request("https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=abc123", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
 
     expect(res.status).toBe(200);
-    expect(await env.AUTH_TOKENS.get("refresh:github:user@example.com")).toBe("ghr_refresh");
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com")).toBe("ghr_refresh");
 
-    const meta = (await env.AUTH_TOKENS.get("meta:github:user@example.com", "json")) as any;
+    const meta = (await env.AUTH_TOKENS.get("meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "json")) as any;
     expect(meta.linked_at).toBeTruthy();
     expect(meta.details).toBeUndefined();
     expect(consoleErrorSpy).toHaveBeenCalled();
@@ -309,22 +321,22 @@ describe("router fetch", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/callback/github?code=abc123", {
+    const request = new Request("https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=abc123", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
 
     expect(res.status).toBe(200);
-    const meta = (await env.AUTH_TOKENS.get("meta:github:user@example.com", "json")) as any;
+    const meta = (await env.AUTH_TOKENS.get("meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "json")) as any;
     expect(meta.linked_at).toBeTruthy();
     expect(meta.details).toBeUndefined();
   });
 
   it("get-token refresh success updates last_refreshed while preserving linked_at and details", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_old");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "ghr_old");
     await env.AUTH_TOKENS.put(
-      "meta:github:user@example.com",
+      "meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com",
       JSON.stringify({ linked_at: "2026-01-01T00:00:00.000Z", details: { login: "octocat" } })
     );
 
@@ -338,13 +350,13 @@ describe("router fetch", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/get-token/github", {
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
 
     expect(res.status).toBe(200);
-    const meta = (await env.AUTH_TOKENS.get("meta:github:user@example.com", "json")) as any;
+    const meta = (await env.AUTH_TOKENS.get("meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "json")) as any;
     expect(meta.linked_at).toBe("2026-01-01T00:00:00.000Z");
     expect(meta.details).toEqual({ login: "octocat" });
     expect(meta.last_refreshed).toBeTruthy();
@@ -352,7 +364,7 @@ describe("router fetch", () => {
 
   it("get-token refresh success creates a meta key when none existed before", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_old");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "ghr_old");
 
     vi.stubGlobal(
       "fetch",
@@ -364,21 +376,23 @@ describe("router fetch", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/get-token/github", {
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
     const res = await worker.fetch(request, env, {} as any);
 
     expect(res.status).toBe(200);
-    const meta = (await env.AUTH_TOKENS.get("meta:github:user@example.com", "json")) as any;
+    const meta = (await env.AUTH_TOKENS.get("meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "json")) as any;
     expect(meta.linked_at).toBeTruthy();
     expect(meta.last_refreshed).toBeTruthy();
   });
 });
 
 describe("metaKey / writeMeta helpers", () => {
-  it("metaKey builds the meta:<provider>:<userId> KV key", () => {
-    expect(metaKey("github", "user@example.com")).toBe("meta:github:user@example.com");
+  it("metaKey builds the meta:<slug>:<userId> KV key from a full multi-segment slug", () => {
+    expect(metaKey("github/jsmunro/Iv23lifj0i4aV6qYR76i", "user@example.com")).toBe(
+      "meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com"
+    );
   });
 
   it("writeMeta writes meta without details when the provider has no describeLink method", async () => {
@@ -423,8 +437,8 @@ describe("metaKey / writeMeta helpers", () => {
 describe("scheduled cron rotation", () => {
   it("rotates refresh tokens for all stored keys and persists new ones", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:alice@example.com", "ghr_alice_old");
-    await env.AUTH_TOKENS.put("refresh:github:bob@example.com", "ghr_bob_old");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com", "ghr_alice_old");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:bob@example.com", "ghr_bob_old");
 
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const body = new URLSearchParams(init?.body as string);
@@ -442,14 +456,14 @@ describe("scheduled cron rotation", () => {
 
     await worker.scheduled({} as any, env, {} as any);
 
-    expect(await env.AUTH_TOKENS.get("refresh:github:alice@example.com")).toBe("ghr_alice_old-rotated");
-    expect(await env.AUTH_TOKENS.get("refresh:github:bob@example.com")).toBe("ghr_bob_old-rotated");
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com")).toBe("ghr_alice_old-rotated");
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:bob@example.com")).toBe("ghr_bob_old-rotated");
   });
 
   it("logs and continues when a per-key refresh fails, without deleting the key", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:broken@example.com", "ghr_broken");
-    await env.AUTH_TOKENS.put("refresh:github:ok@example.com", "ghr_ok");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:broken@example.com", "ghr_broken");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:ok@example.com", "ghr_ok");
 
     const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -474,8 +488,8 @@ describe("scheduled cron rotation", () => {
     await worker.scheduled({} as any, env, {} as any);
 
     // The broken key must NOT be deleted by cron (unlike get-token behavior).
-    expect(await env.AUTH_TOKENS.get("refresh:github:broken@example.com")).toBe("ghr_broken");
-    expect(await env.AUTH_TOKENS.get("refresh:github:ok@example.com")).toBe("ghr_ok_rotated");
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:broken@example.com")).toBe("ghr_broken");
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:ok@example.com")).toBe("ghr_ok_rotated");
     expect(consoleErrorSpy).toHaveBeenCalled();
 
     consoleErrorSpy.mockRestore();
@@ -483,9 +497,9 @@ describe("scheduled cron rotation", () => {
 
   it("updates last_refreshed in the meta key on successful cron refresh", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:alice@example.com", "ghr_alice_old");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com", "ghr_alice_old");
     await env.AUTH_TOKENS.put(
-      "meta:github:alice@example.com",
+      "meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com",
       JSON.stringify({ linked_at: "2026-01-01T00:00:00.000Z" })
     );
 
@@ -501,8 +515,98 @@ describe("scheduled cron rotation", () => {
 
     await worker.scheduled({} as any, env, {} as any);
 
-    const meta = (await env.AUTH_TOKENS.get("meta:github:alice@example.com", "json")) as any;
+    const meta = (await env.AUTH_TOKENS.get("meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com", "json")) as any;
     expect(meta.linked_at).toBe("2026-01-01T00:00:00.000Z");
     expect(meta.last_refreshed).toBeTruthy();
+  });
+});
+
+describe("scheduled cron app metadata refresh", () => {
+  const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
+  const GITHUB_APP_URL = "https://api.github.com/app";
+
+  it("runs after token refresh, populating the KV app:<slug> cache for github", async () => {
+    const { privateKey } = await generateTestKeyPair();
+    const pem = await exportPrivateKeyAsPkcs8Pem(privateKey);
+    const env = makeEnv({ GITHUB_APP_ID: "42", GITHUB_APP_PRIVATE_KEY: pem });
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com", "ghr_alice_old");
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input.toString();
+        if (url === GITHUB_TOKEN_URL) {
+          return new Response(
+            JSON.stringify({ access_token: "tok", expires_in: 28800, refresh_token: "ghr_alice_new" }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url === GITHUB_APP_URL) {
+          return new Response(JSON.stringify({ name: "Brokers App", html_url: "https://github.com/apps/brokers" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      })
+    );
+
+    await worker.scheduled({} as any, env, {} as any);
+
+    // Token refresh still happened.
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com")).toBe(
+      "ghr_alice_new"
+    );
+
+    const cached = (await env.AUTH_TOKENS.get("app:github/jsmunro/Iv23lifj0i4aV6qYR76i", "json")) as any;
+    expect(cached.name).toBe("Brokers App");
+    expect(cached.html_url).toBe("https://github.com/apps/brokers");
+    expect(cached.fetched_at).toBeTruthy();
+
+    // Cloudflare has no appAuth — no metadata cache entry should be written for it.
+    expect(await env.AUTH_TOKENS.get("app:cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc")).toBeNull();
+  });
+
+  it("logs and leaves stale cache on metadata fetch failure without breaking token refresh", async () => {
+    const { privateKey } = await generateTestKeyPair();
+    const pem = await exportPrivateKeyAsPkcs8Pem(privateKey);
+    const env = makeEnv({ GITHUB_APP_ID: "42", GITHUB_APP_PRIVATE_KEY: pem });
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com", "ghr_alice_old");
+    await env.AUTH_TOKENS.put(
+      "app:github/jsmunro/Iv23lifj0i4aV6qYR76i",
+      JSON.stringify({ name: "Stale App", fetched_at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() })
+    );
+
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input.toString();
+        if (url === GITHUB_TOKEN_URL) {
+          return new Response(
+            JSON.stringify({ access_token: "tok", expires_in: 28800, refresh_token: "ghr_alice_new" }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url === GITHUB_APP_URL) {
+          return new Response("server error", { status: 500 });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      })
+    );
+
+    await worker.scheduled({} as any, env, {} as any);
+
+    // Token refresh unaffected by the metadata failure.
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com")).toBe(
+      "ghr_alice_new"
+    );
+
+    // Stale metadata is retained rather than cleared.
+    const cached = (await env.AUTH_TOKENS.get("app:github/jsmunro/Iv23lifj0i4aV6qYR76i", "json")) as any;
+    expect(cached.name).toBe("Stale App");
+    expect(consoleErrorSpy).toHaveBeenCalled();
+
+    consoleErrorSpy.mockRestore();
   });
 });
