@@ -1,11 +1,12 @@
 import type { AuthProvider, Env, LinkMeta } from "./types";
-import { GitHubProvider } from "./providers/github";
-import { CloudflareProvider } from "./providers/cloudflare";
+import { appConfigs } from "./registry";
 
-// Slugs only, for the server-rendered page skeleton (Task 2's `renderDashboardPage()`
-// takes no arguments per the interface contract). The live registry used for routing
-// and KV lookups is passed into `handleLinks`/`handleUnlink` by the caller in index.ts.
-const DASHBOARD_PROVIDER_SLUGS: string[] = [new GitHubProvider().slug, new CloudflareProvider().slug];
+// Slugs only, for the server-rendered page skeleton (`renderDashboardPage()` takes
+// no arguments per the interface contract). Derived from the registry so the
+// skeleton can never drift from the live set of registered apps. The live
+// registry used for routing and KV lookups is passed into
+// `handleLinks`/`handleUnlink` by the caller in index.ts.
+const DASHBOARD_PROVIDER_SLUGS: string[] = Object.keys(appConfigs);
 
 const KV_PREFIX = "refresh:";
 const META_PREFIX = "meta:";

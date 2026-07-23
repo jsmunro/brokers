@@ -348,9 +348,9 @@ describe("GET /api/me device enrichment", () => {
 describe("GET /api/links", () => {
   it("lists linked-with-meta github and unlinked cloudflare", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_token");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "ghr_token");
     await env.AUTH_TOKENS.put(
-      "meta:github:user@example.com",
+      "meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com",
       JSON.stringify({
         linked_at: "2026-01-01T00:00:00.000Z",
         last_refreshed: "2026-01-02T00:00:00.000Z",
@@ -366,14 +366,14 @@ describe("GET /api/links", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as any[];
 
-    const github = body.find((e) => e.slug === "github");
+    const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
     expect(github.linked).toBe(true);
     expect(github.details).toEqual({ login: "octocat" });
     expect(github.linked_at).toBe("2026-01-01T00:00:00.000Z");
     expect(github.last_refreshed).toBe("2026-01-02T00:00:00.000Z");
     expect(github.auth_url).toBeUndefined();
 
-    const cloudflare = body.find((e) => e.slug === "cloudflare");
+    const cloudflare = body.find((e) => e.slug === "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
     expect(cloudflare.linked).toBe(false);
     expect(cloudflare.auth_url).toContain("https://dash.cloudflare.com/oauth2/auth");
     expect(cloudflare.details).toBeUndefined();
@@ -381,7 +381,7 @@ describe("GET /api/links", () => {
 
   it("linked without meta reports linked:true with no details", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_token");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "ghr_token");
 
     const request = new Request("https://broker.jsmunro.me/api/links", {
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
@@ -389,7 +389,7 @@ describe("GET /api/links", () => {
     const res = await worker.fetch(request, env, {} as any);
 
     const body = (await res.json()) as any[];
-    const github = body.find((e) => e.slug === "github");
+    const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
     expect(github.linked).toBe(true);
     expect(github.details).toBeUndefined();
     expect(github.linked_at).toBeUndefined();
@@ -407,13 +407,13 @@ describe("GET /api/links", () => {
 describe("DELETE /api/links/<provider>", () => {
   it("deletes both KV keys and returns ok:true", async () => {
     const env = makeEnv();
-    await env.AUTH_TOKENS.put("refresh:github:user@example.com", "ghr_token");
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com", "ghr_token");
     await env.AUTH_TOKENS.put(
-      "meta:github:user@example.com",
+      "meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com",
       JSON.stringify({ linked_at: "2026-01-01T00:00:00.000Z" })
     );
 
-    const request = new Request("https://broker.jsmunro.me/api/links/github", {
+    const request = new Request("https://broker.jsmunro.me/api/links/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
       method: "DELETE",
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
@@ -423,8 +423,8 @@ describe("DELETE /api/links/<provider>", () => {
     const body = (await res.json()) as any;
     expect(body).toEqual({ ok: true });
 
-    expect(await env.AUTH_TOKENS.get("refresh:github:user@example.com")).toBeNull();
-    expect(await env.AUTH_TOKENS.get("meta:github:user@example.com")).toBeNull();
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com")).toBeNull();
+    expect(await env.AUTH_TOKENS.get("meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:user@example.com")).toBeNull();
   });
 
   it("returns 404 unsupported-provider shape for an unknown slug", async () => {
@@ -442,7 +442,7 @@ describe("DELETE /api/links/<provider>", () => {
 
   it("is idempotent: unlinking an already-unlinked provider still returns ok:true", async () => {
     const env = makeEnv();
-    const request = new Request("https://broker.jsmunro.me/api/links/github", {
+    const request = new Request("https://broker.jsmunro.me/api/links/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
       method: "DELETE",
       headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
     });
@@ -455,7 +455,7 @@ describe("DELETE /api/links/<provider>", () => {
 
   it("401 when unauthenticated", async () => {
     const env = makeEnv();
-    const request = new Request("https://broker.jsmunro.me/api/links/github", { method: "DELETE" });
+    const request = new Request("https://broker.jsmunro.me/api/links/github/jsmunro/Iv23lifj0i4aV6qYR76i", { method: "DELETE" });
     const res = await worker.fetch(request, env, {} as any);
     expect(res.status).toBe(401);
   });
@@ -474,9 +474,12 @@ describe("callback success page", () => {
       })
     );
 
-    const request = new Request("https://broker.jsmunro.me/callback/github?code=abc123", {
-      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
-    });
+    const request = new Request(
+      "https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=abc123",
+      {
+        headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+      }
+    );
     const res = await worker.fetch(request, env, {} as any);
     const text = await res.text();
     expect(text).toContain('<a href="/">Back to dashboard</a>');

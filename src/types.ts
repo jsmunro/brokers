@@ -34,3 +34,14 @@ export interface LinkMeta {
   last_refreshed?: string;
   details?: Record<string, string>;
 }
+
+/**
+ * A single app registration in the registry, keyed by its full slug
+ * `<provider>/<org>/<clientid>`. `provider` is normally built via
+ * `oauth2Provider(...)` but may be any `AuthProvider` implementation.
+ */
+export interface AppConfig {
+  slug: string;
+  displayName: string;
+  provider: AuthProvider;
+}

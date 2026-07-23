@@ -1,13 +1,7 @@
 import type { AuthProvider, Env, LinkMeta } from "./types";
 import { verifyAccessJwt } from "./access";
-import { GitHubProvider } from "./providers/github";
-import { CloudflareProvider } from "./providers/cloudflare";
+import { apps as providers } from "./registry";
 import { renderDashboardPage, handleMe, handleLinks, handleUnlink } from "./dashboard";
-
-const providers: Record<string, AuthProvider> = {
-  github: new GitHubProvider(),
-  cloudflare: new CloudflareProvider(),
-};
 
 const KV_PREFIX = "refresh:";
 const META_PREFIX = "meta:";
@@ -16,7 +10,7 @@ function kvKey(provider: string, userId: string): string {
   return `${KV_PREFIX}${provider}:${userId}`;
 }
 
-/** KV key for a provider link's metadata. Exported for the dashboard layer (Task 2). */
+/** KV key for a provider link's metadata. Exported for the dashboard layer. */
 export function metaKey(provider: string, userId: string): string {
   return `${META_PREFIX}${provider}:${userId}`;
 }
@@ -147,7 +141,7 @@ export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const segments = url.pathname.split("/").filter(Boolean);
-    const [action, providerSlug] = segments;
+    const [action, ...rest] = segments;
 
     const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
     if (!accessJwt) {
@@ -175,8 +169,9 @@ export default {
       return handleLinks(env, userId, providers);
     }
 
-    if (action === "api" && segments[1] === "links" && segments.length === 3 && request.method === "DELETE") {
-      return handleUnlink(env, userId, providers, segments[2]!);
+    if (action === "api" && segments[1] === "links" && segments.length >= 3 && request.method === "DELETE") {
+      const slug = segments.slice(2).join("/");
+      return handleUnlink(env, userId, providers, slug);
     }
 
     if (action !== "get-token" && action !== "callback") {
@@ -186,8 +181,10 @@ export default {
       });
     }
 
+    const providerSlug = rest.join("/");
+
     if (!providerSlug || !providers[providerSlug]) {
-      return jsonResponse({ error: `Unsupported provider: ${providerSlug ?? ""}` }, 404);
+      return jsonResponse({ error: `Unsupported provider: ${providerSlug}` }, 404);
     }
 
     const provider = providers[providerSlug]!;
