@@ -44,8 +44,10 @@ SETUP_REQUIRED="$(echo "$RESPONSE" | jq -r '.setup_required // false')"
 
 if [ "$SETUP_REQUIRED" = "true" ]; then
   AUTH_URL="$(echo "$RESPONSE" | jq -r '.url')"
+  # Everything in this branch goes to stderr: stdout is reserved for the
+  # token JSON so $(cf-auth.sh ... | jq) never sees the setup URL.
   echo "Setup required. Open this URL to link $PROVIDER:" >&2
-  echo "$AUTH_URL"
+  echo "$AUTH_URL" >&2
 
   if command -v xdg-open >/dev/null 2>&1; then
     xdg-open "$AUTH_URL" >/dev/null 2>&1 || true
