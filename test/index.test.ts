@@ -39,6 +39,16 @@ describe("router fetch", () => {
     expect(body).toEqual({ error: "Invalid Access token" });
   });
 
+  it("returns 401 JSON for an unsupported provider when unauthenticated (auth checked before routing)", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/get-token/nope");
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body).toEqual({ error: "Unauthorized: Cloudflare Access Required" });
+  });
+
   it("returns 404 JSON for an unsupported provider", async () => {
     const env = makeEnv();
     const request = new Request("https://broker.jsmunro.me/get-token/nope", {

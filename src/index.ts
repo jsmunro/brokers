@@ -80,19 +80,6 @@ export default {
     const segments = url.pathname.split("/").filter(Boolean);
     const [action, providerSlug] = segments;
 
-    if (action !== "get-token" && action !== "callback") {
-      return new Response("Endpoint Not Found", {
-        status: 404,
-        headers: { "Content-Type": "text/plain" },
-      });
-    }
-
-    if (!providerSlug || !providers[providerSlug]) {
-      return jsonResponse({ error: `Unsupported provider: ${providerSlug ?? ""}` }, 404);
-    }
-
-    const provider = providers[providerSlug]!;
-
     const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
     if (!accessJwt) {
       return jsonResponse({ error: "Unauthorized: Cloudflare Access Required" }, 401);
@@ -105,6 +92,19 @@ export default {
     } catch {
       return jsonResponse({ error: "Invalid Access token" }, 403);
     }
+
+    if (action !== "get-token" && action !== "callback") {
+      return new Response("Endpoint Not Found", {
+        status: 404,
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
+
+    if (!providerSlug || !providers[providerSlug]) {
+      return jsonResponse({ error: `Unsupported provider: ${providerSlug ?? ""}` }, 404);
+    }
+
+    const provider = providers[providerSlug]!;
 
     if (action === "callback") {
       return handleCallback(provider, request, env, userId);

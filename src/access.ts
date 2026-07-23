@@ -40,11 +40,11 @@ function base64UrlDecodeToString(b64url: string): string {
   return new TextDecoder().decode(base64UrlToUint8Array(b64url));
 }
 
-async function getJwks(env: Env): Promise<Jwk[]> {
+async function getJwks(env: Env, forceRefetch = false): Promise<Jwk[]> {
   const url = `https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`;
   const cached = jwksCache.get(url);
   const now = Date.now();
-  if (cached && now - cached.fetchedAt < JWKS_TTL_MS) {
+  if (!forceRefetch && cached && now - cached.fetchedAt < JWKS_TTL_MS) {
     return cached.keys;
   }
 
@@ -92,8 +92,14 @@ export async function verifyAccessJwt(
     throw new Error(`Unsupported JWT alg: ${header.alg}`);
   }
 
-  const keys = await getJwks(env);
-  const matching = keys.find((k) => k.kid === header.kid);
+  let keys = await getJwks(env);
+  let matching = keys.find((k) => k.kid === header.kid);
+  if (!matching) {
+    // The key may have rotated since our cached JWKS was fetched; force one
+    // fresh refetch and retry before giving up.
+    keys = await getJwks(env, true);
+    matching = keys.find((k) => k.kid === header.kid);
+  }
   if (!matching) {
     throw new Error("No matching JWKS key for kid");
   }
