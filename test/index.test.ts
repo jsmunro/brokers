@@ -61,6 +61,18 @@ describe("router fetch", () => {
     expect(body).toEqual({ error: "Unsupported provider: nope" });
   });
 
+  it("returns 404 JSON for an unsupported provider with a full 3-part slug", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/get-token/github/unknown-org/xyz", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body).toEqual({ error: "Unsupported provider: github/unknown-org/xyz" });
+  });
+
   it("returns 404 text for an unknown action", async () => {
     const env = makeEnv();
     const request = new Request("https://broker.jsmunro.me/frobnicate/github", {

@@ -440,6 +440,19 @@ describe("DELETE /api/links/<provider>", () => {
     expect(body).toEqual({ error: "Unsupported provider: nope" });
   });
 
+  it("returns 404 unsupported-provider shape for an unknown 3-part slug", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/api/links/github/unknown-org/xyz", {
+      method: "DELETE",
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body).toEqual({ error: "Unsupported provider: github/unknown-org/xyz" });
+  });
+
   it("is idempotent: unlinking an already-unlinked provider still returns ok:true", async () => {
     const env = makeEnv();
     const request = new Request("https://broker.jsmunro.me/api/links/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
