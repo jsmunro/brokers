@@ -2,6 +2,7 @@ import type { AuthProvider, Env, LinkMeta } from "./types";
 import { verifyAccessJwt } from "./access";
 import { GitHubProvider } from "./providers/github";
 import { CloudflareProvider } from "./providers/cloudflare";
+import { renderDashboardPage, handleMe, handleLinks, handleUnlink } from "./dashboard";
 
 const providers: Record<string, AuthProvider> = {
   github: new GitHubProvider(),
@@ -95,10 +96,13 @@ async function handleCallback(
     const { refreshToken, data } = await provider.handleCallback(request, env);
     await env.AUTH_TOKENS.put(kvKey(provider.slug, userId), refreshToken);
     await writeMeta(env, provider, userId, data);
-    return new Response(`<html><body><h1>${provider.slug.toUpperCase()} Linked!</h1></body></html>`, {
-      status: 200,
-      headers: { "Content-Type": "text/html" },
-    });
+    return new Response(
+      `<html><body><h1>${provider.slug.toUpperCase()} Linked!</h1><a href="/">Back to dashboard</a></body></html>`,
+      {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return new Response(`Callback Failed: ${message}`, {
@@ -151,11 +155,28 @@ export default {
     }
 
     let userId: string;
+    let payload: Record<string, unknown>;
     try {
-      const payload = await verifyAccessJwt(accessJwt, env);
-      userId = payload.email;
+      payload = await verifyAccessJwt(accessJwt, env);
+      userId = payload.email as string;
     } catch {
       return jsonResponse({ error: "Invalid Access token" }, 403);
+    }
+
+    if (segments.length === 0 && request.method === "GET") {
+      return renderDashboardPage();
+    }
+
+    if (action === "api" && segments[1] === "me" && segments.length === 2 && request.method === "GET") {
+      return handleMe(payload);
+    }
+
+    if (action === "api" && segments[1] === "links" && segments.length === 2 && request.method === "GET") {
+      return handleLinks(env, userId, providers);
+    }
+
+    if (action === "api" && segments[1] === "links" && segments.length === 3 && request.method === "DELETE") {
+      return handleUnlink(env, userId, providers, segments[2]!);
     }
 
     if (action !== "get-token" && action !== "callback") {
