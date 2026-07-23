@@ -2,6 +2,8 @@ export interface Env {
   AUTH_TOKENS: KVNamespace;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
+  CLOUDFLARE_OAUTH_CLIENT_ID: string;
+  CLOUDFLARE_OAUTH_CLIENT_SECRET: string;
   BROKER_URL: string;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;

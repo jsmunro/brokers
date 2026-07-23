@@ -34,6 +34,8 @@ export function makeEnv(overrides: Partial<Env> = {}): Env {
     AUTH_TOKENS: kv as unknown as Env["AUTH_TOKENS"],
     GITHUB_CLIENT_ID: "Iv23test",
     GITHUB_CLIENT_SECRET: "test-secret",
+    CLOUDFLARE_OAUTH_CLIENT_ID: "cf-client-id",
+    CLOUDFLARE_OAUTH_CLIENT_SECRET: "cf-client-secret",
     BROKER_URL: "https://broker.jsmunro.me",
     ACCESS_TEAM_DOMAIN: "jsmunro.cloudflareaccess.com",
     ACCESS_AUD: "test-aud",

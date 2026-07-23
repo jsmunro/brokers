@@ -1,9 +1,11 @@
 import type { AuthProvider, Env } from "./types";
 import { verifyAccessJwt } from "./access";
 import { GitHubProvider } from "./providers/github";
+import { CloudflareProvider } from "./providers/cloudflare";
 
 const providers: Record<string, AuthProvider> = {
   github: new GitHubProvider(),
+  cloudflare: new CloudflareProvider(),
 };
 
 const KV_PREFIX = "refresh:";

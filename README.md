@@ -2,7 +2,7 @@
 
 A modular, extensible SaaS-token broker that runs as a single Cloudflare Worker
 behind Cloudflare Access. It centralizes OAuth token acquisition and refresh
-for third-party providers (GitHub first) so that terminal tools and scripts
+for third-party providers (GitHub, Cloudflare) so that terminal tools and scripts
 can fetch a short-lived, always-fresh access token with one authenticated
 HTTP call instead of each holding their own OAuth client secrets.
 
@@ -22,6 +22,9 @@ The worker is split into a small **core engine** and a registry of
   provider plugin implements.
 - `src/providers/github.ts` — the GitHub provider plugin (GitHub App, web
   application flow, expiring user tokens).
+- `src/providers/cloudflare.ts` — the Cloudflare provider plugin (confidential
+  OAuth client, `client_secret_post`, brokered tokens are Cloudflare API
+  bearer tokens usable against `api.cloudflare.com`).
 
 Each provider is a self-contained module implementing:
 
@@ -89,6 +92,10 @@ npm test                  # vitest unit tests
 npx wrangler secret put GITHUB_CLIENT_ID
 npx wrangler secret put GITHUB_CLIENT_SECRET
 
+# one-time secrets (Cloudflare OAuth client credentials)
+npx wrangler secret put CLOUDFLARE_OAUTH_CLIENT_ID
+npx wrangler secret put CLOUDFLARE_OAUTH_CLIENT_SECRET
+
 # confirm what's configured
 npx wrangler secret list
 
@@ -122,6 +129,19 @@ other tools that read `GH_TOKEN`:
 ```bash
 alias auth-github='export GH_TOKEN=$(cf-auth.sh github | jq -r .token)'
 ```
+
+For Cloudflare, the brokered token is a Bearer token usable directly against
+`api.cloudflare.com`:
+
+```bash
+export CLOUDFLARE_API_TOKEN=$(scripts/cf-auth.sh cloudflare | jq -r .token)
+```
+
+The Cloudflare provider uses a confidential OAuth client
+(`client_secret_post`, no PKCE), configured via the `CLOUDFLARE_OAUTH_CLIENT_ID`
+and `CLOUDFLARE_OAUTH_CLIENT_SECRET` secrets. Scopes are not requested per
+authorize-request — they're fixed at the OAuth client's registration (107
+scopes, including `offline_access`, which is required for refresh tokens).
 
 Requires `jq` and `cloudflared` on `PATH`; the script fails fast with a
 clear message if either is missing.
