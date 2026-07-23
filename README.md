@@ -42,9 +42,11 @@ namespace (`userId` is the verified Access JWT `email` claim).
 ## Endpoints
 
 Deployed at `https://broker.jsmunro.me` (Worker name `central-auth-broker`,
-zone `jsmunro.me`). Every request must carry a valid `Cf-Access-Jwt-Assertion`
-header (Cloudflare Access); missing or invalid tokens get `401`/`403` JSON
-errors.
+zone `jsmunro.me`). Every request must pass Cloudflare Access: non-browser
+clients authenticate to the Access edge with a `cf-access-token: <jwt>` header
+(the JWT from `cloudflared access token`); Access then injects the
+`Cf-Access-Jwt-Assertion` header that the worker verifies. Requests reaching
+the worker without a valid assertion get `401`/`403` JSON errors.
 
 - `GET /get-token/<provider>` — returns `{"token": ..., "expires_in": ...}`
   for the caller's stored token, refreshing it first if necessary. If no

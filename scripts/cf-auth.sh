@@ -36,7 +36,9 @@ if [ -z "$JWT" ]; then
   JWT="$(cloudflared access token --app="$BROKER_URL")"
 fi
 
-RESPONSE="$(curl -sS -H "Cf-Access-Jwt-Assertion: $JWT" "$BROKER_URL/get-token/$PROVIDER")"
+# The Access edge authenticates clients via the cf-access-token header and
+# injects Cf-Access-Jwt-Assertion toward the origin itself.
+RESPONSE="$(curl -sS -H "cf-access-token: $JWT" "$BROKER_URL/get-token/$PROVIDER")"
 
 SETUP_REQUIRED="$(echo "$RESPONSE" | jq -r '.setup_required // false')"
 
