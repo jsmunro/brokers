@@ -1,0 +1,22 @@
+name = "central-auth-broker"
+main = "src/index.ts"
+compatibility_date = "2026-07-23"
+account_id = "314e7e015b5f4429c4e2da1e6ec93271"
+workers_dev = false
+
+routes = [
+  { pattern = "broker.jsmunro.me/*", zone_name = "jsmunro.me" }
+]
+
+kv_namespaces = [
+  { binding = "AUTH_TOKENS", id = "REPLACE_WITH_KV_ID" }
+]
+
+[triggers]
+crons = ["*/30 * * * *"]
+
+[vars]
+BROKER_URL = "https://broker.jsmunro.me"
+ACCESS_TEAM_DOMAIN = "jsmunro.cloudflareaccess.com"
+ACCESS_AUD = "REPLACE_WITH_ACCESS_AUD"
+ENVIRONMENT = "production"
