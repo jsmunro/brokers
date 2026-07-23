@@ -9,7 +9,7 @@ routes = [
 ]
 
 kv_namespaces = [
-  { binding = "AUTH_TOKENS", id = "REPLACE_WITH_KV_ID" }
+  { binding = "AUTH_TOKENS", id = "ef17d3c055e34a8699a596d47878e44c" }
 ]
 
 [triggers]
@@ -18,5 +18,5 @@ crons = ["*/30 * * * *"]
 [vars]
 BROKER_URL = "https://broker.jsmunro.me"
 ACCESS_TEAM_DOMAIN = "jsmunro.cloudflareaccess.com"
-ACCESS_AUD = "REPLACE_WITH_ACCESS_AUD"
+ACCESS_AUD = "8912bf9e72b6893335dd32ab794eb7b7399d7a554b4bcf7a1ca3c04be49cf6ab"
 ENVIRONMENT = "production"
