@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeEnv } from "./helpers";
 
 vi.mock("../src/access", () => ({
@@ -14,6 +14,22 @@ vi.mock("../src/access", () => ({
 }));
 
 import worker from "../src/index";
+
+// Every route now goes through handleMe's best-effort get-identity enrichment
+// on /api/me. Default to a rejecting stub so unrelated tests never hit the
+// real network; tests that care about get-identity install their own stub.
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw new Error("network disabled in tests");
+    })
+  );
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("GET /", () => {
   it("returns 401 JSON when unauthenticated", async () => {
@@ -51,6 +67,67 @@ describe("GET /", () => {
     expect(html).toContain("github");
     expect(html).toContain("cloudflare");
     expect(html).toContain('id="identity"');
+    expect(html).toContain("renderDeviceSection");
+  });
+});
+
+describe("renderDeviceSection (inline client script)", () => {
+  // The identity card's device/session section is rendered client-side from
+  // `/api/me`'s `device` field. Extract the function from the served page and
+  // exercise it directly rather than executing a full browser DOM.
+  function extractRenderDeviceSection(html: string): (device: any) => string {
+    const start = html.indexOf("function renderDeviceSection");
+    const end = html.indexOf("\nasync function loadIdentity");
+    const src = html.slice(start, end);
+    const esc = (s: unknown) =>
+      String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    // eslint-disable-next-line no-new-func
+    return new Function("esc", `${src}\nreturn renderDeviceSection;`)(esc);
+  }
+
+  it("renders nothing when device is absent", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    const html = await res.text();
+    const render = extractRenderDeviceSection(html);
+
+    expect(render(undefined)).toBe("");
+  });
+
+  it("renders IdP, IP/country, WARP/Gateway pills, and posture rows when device is present", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    const html = await res.text();
+    const render = extractRenderDeviceSection(html);
+
+    const out = render({
+      idp: "onetimepin",
+      ip: "203.0.113.7",
+      country: "AU",
+      is_warp: true,
+      is_gateway: false,
+      posture: [{ rule: "Minimum OS", type: "os_version", success: true }],
+    });
+
+    expect(out).toContain("Device &amp; session");
+    expect(out).toContain("onetimepin");
+    expect(out).toContain("203.0.113.7");
+    expect(out).toContain("AU");
+    expect(out).toContain("On");
+    expect(out).toContain("Off");
+    expect(out).toContain("Minimum OS");
+    expect(out).toContain("✓");
   });
 });
 
@@ -68,6 +145,7 @@ describe("GET /api/me", () => {
     expect(body.exp).toBe(1234567890);
     expect(body.name).toBeUndefined();
     expect(body.idp).toBeUndefined();
+    expect(body.device).toBeUndefined();
   });
 
   it("includes name and idp only when claimed", async () => {
@@ -88,6 +166,182 @@ describe("GET /api/me", () => {
     const request = new Request("https://broker.jsmunro.me/api/me");
     const res = await worker.fetch(request, env, {} as any);
     expect(res.status).toBe(401);
+  });
+});
+
+describe("GET /api/me device enrichment", () => {
+  const fullIdentity = {
+    id: "identity-id",
+    name: "Jane Doe",
+    email: "user@example.com",
+    idp: { id: "idp-id", type: "onetimepin" },
+    geo: { country: "AU" },
+    ip: "203.0.113.7",
+    devicePosture: {
+      "uuid-1": { type: "os_version", rule_name: "Minimum OS", success: true },
+      "uuid-2": { type: "disk_encryption", rule_name: "Disk Encrypted", success: false },
+    },
+    is_warp: true,
+    is_gateway: false,
+    device_sessions: { "session-1": {}, "session-2": {} },
+  };
+
+  it("calls get-identity with the request's CF_Authorization cookie taking precedence over the header", async () => {
+    const env = makeEnv();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(input.toString()).toBe(`https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/get-identity`);
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Cookie).toBe("CF_Authorization=cookie-value");
+      return new Response(JSON.stringify(fullIdentity), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request = new Request("https://broker.jsmunro.me/api/me", {
+      headers: {
+        "Cf-Access-Jwt-Assertion": "valid-jwt",
+        Cookie: "CF_Authorization=cookie-value; other=1",
+      },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the Cf-Access-Jwt-Assertion header as the cookie value when no cookie header is present", async () => {
+    const env = makeEnv();
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Cookie).toBe("CF_Authorization=valid-jwt");
+      return new Response(JSON.stringify(fullIdentity), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request = new Request("https://broker.jsmunro.me/api/me", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("curates the get-identity response into the documented device subset", async () => {
+    const env = makeEnv();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(JSON.stringify(fullIdentity), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/api/me", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    const body = (await res.json()) as any;
+
+    expect(body.device).toEqual({
+      idp: "onetimepin",
+      ip: "203.0.113.7",
+      country: "AU",
+      is_warp: true,
+      is_gateway: false,
+      posture: [
+        { rule: "Minimum OS", type: "os_version", success: true },
+        { rule: "Disk Encrypted", type: "disk_encryption", success: false },
+      ],
+      sessions_count: 2,
+    });
+  });
+
+  it("omits fields that are absent or wrong-typed in the source, and never forwards the raw blob", async () => {
+    const env = makeEnv();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            id: "identity-id",
+            email: "user@example.com",
+            ip: 12345, // wrong type -> omit
+            geo: {}, // no country -> omit
+            devicePosture: {}, // empty -> omit
+            device_sessions: {}, // no keys -> omit
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/api/me", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    const body = (await res.json()) as any;
+
+    expect(body.device).toEqual({});
+    expect(body.device.ip).toBeUndefined();
+    expect(body.device.country).toBeUndefined();
+    expect(body.device.posture).toBeUndefined();
+    expect(body.device.sessions_count).toBeUndefined();
+    expect(body.device.id).toBeUndefined();
+    expect(body.device.email).toBeUndefined();
+  });
+
+  it("returns exactly the base shape (no device field) when get-identity errors", async () => {
+    const env = makeEnv();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("network error");
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/api/me", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body).toEqual({ email: "user@example.com", exp: 1234567890 });
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+
+  it("returns exactly the base shape (no device field) when get-identity responds non-2xx", async () => {
+    const env = makeEnv();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response("forbidden", { status: 403 });
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/api/me", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body).toEqual({ email: "user@example.com", exp: 1234567890 });
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
   });
 });
 

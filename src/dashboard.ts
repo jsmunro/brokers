@@ -35,9 +35,127 @@ export function esc(value: unknown): string {
     .replace(/'/g, "&#39;");
 }
 
-/** `GET /api/me` — reflects the verified Access JWT claims. */
-export function handleMe(payload: Record<string, unknown>): Response {
-  const body: { email: string; exp?: number; name?: string; idp?: string } = {
+export interface DevicePosture {
+  rule: string;
+  type: string;
+  success: boolean;
+}
+
+export interface DeviceInfo {
+  idp?: string;
+  ip?: string;
+  country?: string;
+  is_warp?: boolean;
+  is_gateway?: boolean;
+  posture?: DevicePosture[];
+  sessions_count?: number;
+}
+
+/**
+ * Resolves the `CF_Authorization` value to forward to get-identity, per the
+ * documented precedence: the request's own `CF_Authorization` cookie wins;
+ * otherwise fall back to the verified `Cf-Access-Jwt-Assertion` header value.
+ */
+function resolveAccessCookie(request: Request): string | null {
+  const cookieHeader = request.headers.get("Cookie") ?? request.headers.get("cookie");
+  if (cookieHeader) {
+    for (const part of cookieHeader.split(";")) {
+      const idx = part.indexOf("=");
+      if (idx === -1) continue;
+      const name = part.slice(0, idx).trim();
+      if (name === "CF_Authorization") {
+        return part.slice(idx + 1).trim();
+      }
+    }
+  }
+
+  return request.headers.get("Cf-Access-Jwt-Assertion");
+}
+
+/**
+ * Best-effort fetch of the caller's Cloudflare Access identity (device
+ * posture, session, IP/geo). Any error or non-2xx response is logged and
+ * treated as "no data" — never thrown.
+ */
+async function fetchIdentity(request: Request, env: Env): Promise<Record<string, unknown> | null> {
+  const cfAuth = resolveAccessCookie(request);
+  if (!cfAuth) {
+    return null;
+  }
+
+  try {
+    const res = await fetch(`https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/get-identity`, {
+      headers: { Cookie: `CF_Authorization=${cfAuth}` },
+      signal: AbortSignal.timeout(3000),
+    });
+
+    if (!res.ok) {
+      console.error(`handleMe: get-identity returned status ${res.status}`);
+      return null;
+    }
+
+    return (await res.json()) as Record<string, unknown>;
+  } catch (err) {
+    console.error("handleMe: get-identity request failed", err);
+    return null;
+  }
+}
+
+/** Curates the raw get-identity blob down to the documented subset. Never forwards the raw blob. */
+function curateDevice(identity: Record<string, unknown> | null): DeviceInfo | undefined {
+  if (!identity) {
+    return undefined;
+  }
+
+  const device: DeviceInfo = {};
+
+  const idp = identity.idp as { type?: unknown } | undefined;
+  if (idp && typeof idp.type === "string") {
+    device.idp = idp.type;
+  }
+
+  if (typeof identity.ip === "string") {
+    device.ip = identity.ip;
+  }
+
+  const geo = identity.geo as { country?: unknown } | undefined;
+  if (geo && typeof geo.country === "string") {
+    device.country = geo.country;
+  }
+
+  if (typeof identity.is_warp === "boolean") {
+    device.is_warp = identity.is_warp;
+  }
+  if (typeof identity.is_gateway === "boolean") {
+    device.is_gateway = identity.is_gateway;
+  }
+
+  const devicePosture = identity.devicePosture as Record<string, unknown> | undefined;
+  if (devicePosture && typeof devicePosture === "object") {
+    const entries = Object.values(devicePosture) as Array<Record<string, unknown>>;
+    if (entries.length > 0) {
+      device.posture = entries.map((entry) => ({
+        rule: entry?.rule_name as string,
+        type: entry?.type as string,
+        success: entry?.success as boolean,
+      }));
+    }
+  }
+
+  const deviceSessions = identity.device_sessions as Record<string, unknown> | undefined;
+  if (deviceSessions && typeof deviceSessions === "object") {
+    const count = Object.keys(deviceSessions).length;
+    if (count > 0) {
+      device.sessions_count = count;
+    }
+  }
+
+  return device;
+}
+
+/** `GET /api/me` — reflects the verified Access JWT claims, plus best-effort device/session enrichment. */
+export async function handleMe(payload: Record<string, unknown>, request: Request, env: Env): Promise<Response> {
+  const body: { email: string; exp?: number; name?: string; idp?: string; device?: DeviceInfo } = {
     email: payload.email as string,
   };
 
@@ -50,6 +168,12 @@ export function handleMe(payload: Record<string, unknown>): Response {
   const idp = payload.idp as { type?: string } | undefined;
   if (idp && typeof idp.type === "string") {
     body.idp = idp.type;
+  }
+
+  const identity = await fetchIdentity(request, env);
+  const device = curateDevice(identity);
+  if (device) {
+    body.device = device;
   }
 
   return jsonResponse(body);
@@ -237,6 +361,50 @@ function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
+function renderDeviceSection(device) {
+  if (!device) {
+    return "";
+  }
+
+  let rows = "";
+  if (device.idp) {
+    rows += '<div class="row"><span class="k">IdP:</span> ' + esc(device.idp) + '</div>';
+  }
+  if (device.ip) {
+    rows +=
+      '<div class="row"><span class="k">IP:</span> ' +
+      esc(device.ip) +
+      (device.country ? ' (' + esc(device.country) + ')' : '') +
+      '</div>';
+  }
+  if (typeof device.is_warp === "boolean") {
+    rows +=
+      '<div class="row"><span class="k">WARP:</span> <span class="badge ' +
+      (device.is_warp ? "linked" : "unlinked") +
+      '">' + (device.is_warp ? "On" : "Off") + '</span></div>';
+  }
+  if (typeof device.is_gateway === "boolean") {
+    rows +=
+      '<div class="row"><span class="k">Gateway:</span> <span class="badge ' +
+      (device.is_gateway ? "linked" : "unlinked") +
+      '">' + (device.is_gateway ? "On" : "Off") + '</span></div>';
+  }
+  if (Array.isArray(device.posture)) {
+    for (const check of device.posture) {
+      rows +=
+        '<div class="row">' +
+        (check.success ? "✓" : "✗") +
+        ' ' + esc(check.rule) +
+        '</div>';
+    }
+  }
+  if (typeof device.sessions_count === "number") {
+    rows += '<div class="row"><span class="k">Active sessions:</span> ' + esc(device.sessions_count) + '</div>';
+  }
+
+  return '<h3>Device &amp; session</h3>' + rows;
+}
+
 async function loadIdentity() {
   const res = await fetch("/api/me");
   const me = await res.json();
@@ -248,7 +416,8 @@ async function loadIdentity() {
     '<h2>' + esc(me.name || me.email) + '</h2>' +
     '<div class="row"><span class="k">Email:</span> ' + esc(me.email) + '</div>' +
     (me.idp ? '<div class="row"><span class="k">Identity provider:</span> ' + esc(me.idp) + '</div>' : '') +
-    expLine;
+    expLine +
+    renderDeviceSection(me.device);
 }
 
 function renderLinkCard(entry) {

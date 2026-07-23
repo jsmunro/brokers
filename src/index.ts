@@ -168,7 +168,7 @@ export default {
     }
 
     if (action === "api" && segments[1] === "me" && segments.length === 2 && request.method === "GET") {
-      return handleMe(payload);
+      return handleMe(payload, request, env);
     }
 
     if (action === "api" && segments[1] === "links" && segments.length === 2 && request.method === "GET") {
