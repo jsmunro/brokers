@@ -7,7 +7,7 @@ describe("CloudflareProvider", () => {
     vi.unstubAllGlobals();
   });
 
-  it("builds the authorize URL with client_id, redirect_uri, response_type, state, and NO scope", () => {
+  it("builds the authorize URL with client_id, redirect_uri, response_type, state, and scope", () => {
     const env = makeEnv();
     const provider = new CloudflareProvider();
     const authUrl = provider.getAuthUrl(env, "user@example.com");
@@ -18,7 +18,7 @@ describe("CloudflareProvider", () => {
     expect(url.searchParams.get("redirect_uri")).toBe("https://broker.jsmunro.me/callback/cloudflare");
     expect(url.searchParams.get("response_type")).toBe("code");
     expect(url.searchParams.get("state")).toBeTruthy();
-    expect(url.searchParams.has("scope")).toBe(false);
+    expect(url.searchParams.get("scope")).toBe(env.CLOUDFLARE_OAUTH_SCOPES);
   });
 
   it("handleCallback POSTs the correct params and returns the refresh token", async () => {

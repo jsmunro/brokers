@@ -4,6 +4,7 @@ export interface Env {
   GITHUB_CLIENT_SECRET: string;
   CLOUDFLARE_OAUTH_CLIENT_ID: string;
   CLOUDFLARE_OAUTH_CLIENT_SECRET: string;
+  CLOUDFLARE_OAUTH_SCOPES: string;
   BROKER_URL: string;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;

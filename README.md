@@ -139,9 +139,12 @@ export CLOUDFLARE_API_TOKEN=$(scripts/cf-auth.sh cloudflare | jq -r .token)
 
 The Cloudflare provider uses a confidential OAuth client
 (`client_secret_post`, no PKCE), configured via the `CLOUDFLARE_OAUTH_CLIENT_ID`
-and `CLOUDFLARE_OAUTH_CLIENT_SECRET` secrets. Scopes are not requested per
-authorize-request — they're fixed at the OAuth client's registration (107
-scopes, including `offline_access`, which is required for refresh tokens).
+and `CLOUDFLARE_OAUTH_CLIENT_SECRET` secrets. Cloudflare does not default to
+the OAuth client's registered scopes — scopes must be requested explicitly on
+every authorize request via the `scope` parameter, populated from the
+`CLOUDFLARE_OAUTH_SCOPES` var in `wrangler.toml` (a space-separated list,
+including `offline_access`, which is required for refresh tokens). This list
+must be a subset of the scopes granted to the OAuth client at registration.
 
 Requires `jq` and `cloudflared` on `PATH`; the script fails fast with a
 clear message if either is missing.

@@ -36,6 +36,7 @@ export function makeEnv(overrides: Partial<Env> = {}): Env {
     GITHUB_CLIENT_SECRET: "test-secret",
     CLOUDFLARE_OAUTH_CLIENT_ID: "cf-client-id",
     CLOUDFLARE_OAUTH_CLIENT_SECRET: "cf-client-secret",
+    CLOUDFLARE_OAUTH_SCOPES: "offline_access d1.read",
     BROKER_URL: "https://broker.jsmunro.me",
     ACCESS_TEAM_DOMAIN: "jsmunro.cloudflareaccess.com",
     ACCESS_AUD: "test-aud",

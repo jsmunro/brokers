@@ -24,6 +24,7 @@ export class CloudflareProvider implements AuthProvider {
       redirect_uri: redirectUri,
       response_type: "code",
       state,
+      scope: env.CLOUDFLARE_OAUTH_SCOPES,
     });
     return `${CLOUDFLARE_AUTHORIZE_URL}?${params.toString()}`;
   }
