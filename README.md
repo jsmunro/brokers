@@ -6,6 +6,42 @@ for third-party providers (GitHub, Cloudflare) so that terminal tools and script
 can fetch a short-lived, always-fresh access token with one authenticated
 HTTP call instead of each holding their own OAuth client secrets.
 
+## Phase-1 access model
+
+`apps/manifest.json` is the single source of truth for app registration,
+Access groups, and access policy — both the Worker (`src/registry.ts`) and
+Terraform (`infra/`) build off it, so they can never drift out of sync.
+
+- **Manifest-driven registry**: each entry in `manifest.apps[]` carries its
+  OAuth config, declared `scopes`, and `access` (allowed groups, whether it
+  gets a service token, optional per-app `session_duration`). Adding an app
+  is a manifest edit plus a `describeLink` wiring in `src/registry.ts` (see
+  "Adding a new app registration" below), not a code-and-Terraform rewrite.
+- **Per-app Access apps, not one shared app**: Terraform creates, per slug, a
+  **token app** scoped to `broker.jsmunro.me/get-token/<slug>(/*)` and a
+  separate, stricter **linking app** scoped to `.../callback/<slug>(/*)`
+  (the linking app additionally enforces `link_policy`, e.g. `require_warp`).
+  The root app (`broker.jsmunro.me`) still gates the dashboard and `/api/*`
+  routes only.
+- **Groups from the manifest**: `manifest.groups` compiles to Cloudflare
+  Access Groups (email lists, GitHub-team/org rules, or — once activated —
+  Okta group rules); each app's `access.allow_groups` references group names,
+  never raw rules.
+- **Strict per-app AUD enforcement**: the Worker validates the Access JWT's
+  `aud` against `ACCESS_APP_AUDS[<slug>].token` for `/get-token/<slug>` and
+  `.link` for `/callback/<slug>` — no fallback to the root AUD for a
+  registered slug. A slug present in the manifest but missing from
+  `ACCESS_APP_AUDS` fails closed (`403`) rather than silently accepting the
+  root app's token. `ACCESS_APP_AUDS` is populated from Terraform's
+  `app_auds` output by `infra/sync-auds.sh` — see `infra/README.md` for the
+  full apply/sync runbook; **apply order is mandatory: `terraform apply` →
+  `sync-auds.sh` → `wrangler deploy`**, since a deploy with a stale
+  `ACCESS_APP_AUDS` will fail-closed every per-app route.
+- **Per-app service tokens**: apps with `access.service_token: true` (e.g.
+  the GitHub app) get a Cloudflare Access service token via Terraform,
+  usable by non-interactive/machine callers (see "Machine / service-token
+  usage" below).
+
 ## Architecture
 
 The worker is split into a small **core engine** and a registry of
@@ -82,9 +118,15 @@ three segments are always required.
 Deployed at `https://broker.jsmunro.me` (Worker name `central-auth-broker`,
 zone `jsmunro.me`). Every request must pass Cloudflare Access: non-browser
 clients authenticate to the Access edge with a `cf-access-token: <jwt>` header
-(the JWT from `cloudflared access token`); Access then injects the
-`Cf-Access-Jwt-Assertion` header that the worker verifies. Requests reaching
-the worker without a valid assertion get `401`/`403` JSON errors.
+(the JWT from `cloudflared access token`) or a
+`CF-Access-Client-Id`/`CF-Access-Client-Secret` service-token pair; Access
+then injects the `Cf-Access-Jwt-Assertion` header that the worker verifies.
+Requests reaching the worker without a valid assertion get `401`/`403` JSON
+errors. Per the phase-1 access model above, the JWT presented to
+`/get-token/<slug>` and `/callback/<slug>` must carry that specific slug's
+token/link AUD (see `ACCESS_APP_AUDS`) — a JWT scoped only to the root app is
+rejected on these routes even though it is accepted on `/api/*` and the
+dashboard.
 
 - `GET /get-token/<slug>` — returns `{"token": ..., "expires_in": ...}`
   for the caller's stored token, refreshing it first if necessary. If no
@@ -199,18 +241,35 @@ npm run deploy             # wrangler deploy
 
 `wrangler.toml` configures the route (`broker.jsmunro.me/*` on zone
 `jsmunro.me`), the `AUTH_TOKENS` KV binding, the `*/30 * * * *` cron trigger,
-and the non-secret vars `BROKER_URL`, `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, and
-`ENVIRONMENT`. The KV namespace id and `ACCESS_AUD` (the Access application's
-audience tag) are environment-specific and must be filled in at
-infrastructure setup time (see the `REPLACE_WITH_*` placeholders in
-`wrangler.toml`).
+and the non-secret vars `BROKER_URL`, `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`,
+`ACCESS_APP_AUDS`, and `ENVIRONMENT`. The KV namespace id and `ACCESS_AUD`
+(the root Access application's audience tag) are environment-specific and
+must be filled in at infrastructure setup time (see the `REPLACE_WITH_*`
+placeholders in `wrangler.toml`). `ACCESS_APP_AUDS` (the per-slug token/link
+audience map — see "Phase-1 access model" above) is committed as the
+placeholder `"{}"` and is **not** hand-edited: it's generated from
+Terraform's `app_auds` output by `infra/sync-auds.sh`, run after every
+`terraform apply` and before the next `wrangler deploy`.
+
+### Infrastructure (Terraform)
+
+`infra/` holds the Terraform that provisions the per-app Access
+applications, groups, service tokens, and DNS/KV resources described above,
+all compiled from `apps/manifest.json`. See **`infra/README.md`** for the
+full bootstrap → import → `plan`/`apply` → `sync-auds.sh` runbook — the
+apply/sync/deploy ordering there is mandatory, not just recommended, because
+a Worker deploy with a stale `ACCESS_APP_AUDS` fails closed on every per-app
+route.
 
 ## Terminal usage
 
 `scripts/cf-auth.sh` is a small helper for fetching a token from your shell.
-It authenticates via `cloudflared` (Cloudflare Access), calls
-`GET /get-token/<slug>`, and prints the resulting JSON — or, if the app
-hasn't been linked yet, prints/opens the linking URL and exits non-zero.
+It authenticates via Cloudflare Access, calls `GET /get-token/<slug>`, and
+prints the resulting JSON — or, if the app hasn't been linked yet,
+prints/opens the linking URL and exits non-zero. Non-2xx responses from
+either broker call print a friendly message to stderr (which URL failed,
+and to check your Access login) and exit non-zero; stdout is always either
+clean token JSON or nothing.
 
 ```bash
 ./scripts/cf-auth.sh <app-name-or-slug>
@@ -233,6 +292,15 @@ The argument can be:
   prints the candidate slugs and display names to stderr and exits 1 —
   stdout is always either clean token JSON or nothing.
 
+Under the hood, since each app now has its own Access AUD (see "Phase-1
+access model" above), the script uses two different `cloudflared` tokens: it
+authenticates against the *root* app (`$BROKER_URL`) only to resolve a
+friendly name via `GET /api/apps`, then authenticates separately against
+that specific app's *token app* (`$BROKER_URL/get-token/<slug>`) for the
+actual `GET /get-token/<slug>` call — `cloudflared access login` runs again,
+scoped to the per-app URL, the first time you use a given app if there's no
+cached token for it yet.
+
 Add it to your `PATH` and set up convenience aliases to pull just the token
 straight into an environment variable, e.g. for use with the `gh` CLI or
 other tools that read `GH_TOKEN`:
@@ -248,6 +316,27 @@ For Cloudflare, the brokered token is a Bearer token usable directly against
 export CLOUDFLARE_API_TOKEN=$(scripts/cf-auth.sh central-auth-broker | jq -r .token)
 ```
 
+### Machine / service-token usage
+
+For non-interactive callers (CI, servers) that can't run `cloudflared
+access login`, set both `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`
+to a per-app Access **service token** (Terraform-provisioned for any
+manifest app with `access.service_token: true`, e.g. the GitHub app — see
+`infra/README.md` for retrieving the value from Terraform output). When both
+are set, `cf-auth.sh` skips `cloudflared` entirely and authenticates with the
+`CF-Access-Client-Id`/`CF-Access-Client-Secret` headers instead:
+
+```bash
+export CF_ACCESS_CLIENT_ID=...
+export CF_ACCESS_CLIENT_SECRET=...
+export GH_TOKEN=$(./scripts/cf-auth.sh github/jsmunro/Iv23lifj0i4aV6qYR76i | jq -r .token)
+```
+
+In this mode the argument **must** be a full 3-part slug — friendly-name
+resolution is unavailable, because it goes through `GET /api/apps`, which is
+gated by the *root* app's Access policy, and a per-app service token is only
+a member of that specific app's policy, not the root's.
+
 The Cloudflare provider uses a confidential OAuth client
 (`client_secret_post`, no PKCE), configured via the `CLOUDFLARE_OAUTH_CLIENT_ID`
 and `CLOUDFLARE_OAUTH_CLIENT_SECRET` secrets. Cloudflare does not default to
@@ -257,5 +346,6 @@ every authorize request via the `scope` parameter, populated from the
 including `offline_access`, which is required for refresh tokens). This list
 must be a subset of the scopes granted to the OAuth client at registration.
 
-Requires `jq` and `cloudflared` on `PATH`; the script fails fast with a
-clear message if either is missing.
+Requires `jq` on `PATH` always, and `cloudflared` on `PATH` in the default
+(human) mode — not needed in service-token mode; the script fails fast with
+a clear message if a required tool is missing.
