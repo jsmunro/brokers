@@ -57,6 +57,15 @@ Single HTML template rendered server-side with a small inline `<script>` and inl
 - Callback writes meta with details; callback still succeeds when `describeLink` throws; refresh paths update `last_refreshed`.
 - Existing tests must stay green (engine behavior for CLI routes unchanged).
 
+## Device & session enrichment (added 2026-07-23, approved)
+
+- `/api/me` additionally calls `https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/get-identity`, authenticated as the caller: forward the request's `CF_Authorization` cookie value when present, else use the `Cf-Access-Jwt-Assertion` header value as the `CF_Authorization` cookie (both verified working). Best-effort with an AbortSignal timeout of 3s: on any error/non-2xx, `/api/me` returns exactly the base shape (no `device` field), and the failure is `console.error`-logged.
+- `/api/me` gains one optional field, a curated subset of get-identity (never the raw blob):
+  `device?: { idp?: string, ip?: string, country?: string, is_warp?: boolean, is_gateway?: boolean, posture?: Array<{ rule: string, type: string, success: boolean }>, sessions_count?: number }`
+  Mapping: `idp` = `idp.type`; `ip` = `ip`; `country` = `geo.country`; `is_warp`/`is_gateway` verbatim booleans when present; `posture` = values of the `devicePosture` object mapped to `{rule: rule_name, type, success}` (empty object → omit); `sessions_count` = number of keys in `device_sessions` when it is an object with keys, else omit. Omit any field absent/wrong-typed in the source. IP display was explicitly approved.
+- UI: identity card gains a "Device & session" section rendered ONLY when `device` is present: IdP badge, IP + country, WARP and Gateway on/off pills, one row per posture check with a pass/fail marker (e.g. ✓/✗) and the rule name. All values escaped.
+- Tests: get-identity request shape (URL from ACCESS_TEAM_DOMAIN, cookie precedence: request cookie over header fallback); curated mapping incl. omission rules; get-identity failure → `/api/me` identical to today; posture array mapping; page renders section when device present and omits it when absent.
+
 ## Out of scope
 
 Multi-account admin views, token display/copy in the UI, force-refresh button, re-link-overwrite (unlink + link covers it), audit history.
