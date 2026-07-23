@@ -7,6 +7,7 @@ resource "cloudflare_record" "broker" {
   name    = "broker"
   type    = "AAAA"
   content = var.dns_record_content
+  comment = "central-auth-broker worker" # matches the live record; avoids an import-time diff
   proxied = true
   ttl     = 1 # auto/managed by Cloudflare when proxied
 }

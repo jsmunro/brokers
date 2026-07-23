@@ -11,3 +11,4 @@ infra/backend.hcl
 *.auto.tfvars
 terraform.tfvars
 
+infra/tfplan

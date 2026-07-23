@@ -6,17 +6,22 @@
 
 resource "cloudflare_zero_trust_access_application" "root" {
   account_id                 = var.account_id
-  name                       = "central-auth-broker"
+  name                       = "broker.jsmunro.me" # matches the pre-import live name; renaming is cosmetic churn
   domain                     = var.domain
   type                       = "self_hosted"
   session_duration           = local.defaults.access.session_duration
   http_only_cookie_attribute = true
   app_launcher_visible       = true
+  # Preserve settings configured on the live app since its creation:
+  allowed_idps              = [var.github_idp_id]
+  auto_redirect_to_identity = true
 }
 
 import {
   to = cloudflare_zero_trust_access_application.root
-  id = "account/${var.account_id}/${var.root_app_id}"
+  # NOTE: provider 4.52.8 rejects the documented "account/<acc>/<app>" form
+  # with an ImportResourceState error; the bare "<acc>/<app>" form works.
+  id = "${var.account_id}/${var.root_app_id}"
 }
 
 # Replaces the previous ad-hoc email-based policy with an org-members
@@ -29,7 +34,10 @@ resource "cloudflare_zero_trust_access_policy" "root_allow" {
   account_id     = var.account_id
   name           = "org-members-allow"
   decision       = "allow"
-  precedence     = 1
+  # 2, not 1: the pre-Terraform "jack GitHub login" policy holds precedence 1
+  # until it is deleted post-apply (see README runbook); precedences must be
+  # unique per app at create time.
+  precedence = 2
 
   include {
     group = [cloudflare_zero_trust_access_group.this["org-members"].id]
@@ -59,6 +67,9 @@ resource "cloudflare_zero_trust_access_application" "token" {
   type                 = "self_hosted"
   session_duration     = each.value.session_duration
   app_launcher_visible = false
+  # Same IdP pinning/redirect UX as the root app.
+  allowed_idps              = [var.github_idp_id]
+  auto_redirect_to_identity = true
 
   self_hosted_domains = [
     "${var.domain}/get-token/${each.key}",
@@ -103,6 +114,9 @@ resource "cloudflare_zero_trust_access_application" "link" {
   type                 = "self_hosted"
   session_duration     = each.value.session_duration
   app_launcher_visible = false
+  # Same IdP pinning/redirect UX as the root app.
+  allowed_idps              = [var.github_idp_id]
+  auto_redirect_to_identity = true
 
   self_hosted_domains = [
     "${var.domain}/callback/${each.key}",
