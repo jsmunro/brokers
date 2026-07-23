@@ -1,4 +1,4 @@
-import type { AppConfig, AuthProvider, Env, LinkMeta } from "./types";
+import type { AppConfig, AppMetadata, AuthProvider, Env, LinkMeta } from "./types";
 import { appConfigs } from "./registry";
 import { getCachedAppMetadata } from "./appauth";
 
@@ -207,10 +207,30 @@ export async function handleLinks(
 }
 
 /**
+ * Resolves the `scopes` value reported by `/api/apps` for a single app: the
+ * manifest-declared value, unless `scopes.source` is `"metadata.permissions"`
+ * and cached metadata has a `permissions` object — in which case that
+ * resolved object is reported instead (Task 2 adds `access.token_aud`/`link_aud`).
+ */
+function resolveScopes(
+  config: AppConfig,
+  metadata: AppMetadata | null
+): string | string[] | Record<string, string> | undefined {
+  if (!config.scopes) {
+    return undefined;
+  }
+  if (config.scopes.source === "metadata.permissions" && metadata?.permissions) {
+    return metadata.permissions;
+  }
+  return config.scopes.declared;
+}
+
+/**
  * `GET /api/apps` — one entry per registered app: `{ slug, provider, org,
- * client_id, display_name, metadata? }`, `metadata` populated from the KV
- * cache when present. This is the name→slug resolution source for the CLI
- * and dashboard.
+ * client_id, display_name, metadata?, scopes?, access? }`, `metadata`
+ * populated from the KV cache when present, `scopes`/`access` derived from
+ * the manifest (`access.token_aud`/`link_aud` land in a later phase). This is
+ * the name→slug resolution source for the CLI and dashboard.
  */
 export async function handleApps(
   env: Env,
@@ -220,6 +240,7 @@ export async function handleApps(
     Object.values(configs).map(async (config) => {
       const [provider, org, client_id] = config.slug.split("/");
       const metadata = await getCachedAppMetadata(env, config.slug);
+      const scopes = resolveScopes(config, metadata);
       return {
         slug: config.slug,
         provider,
@@ -227,6 +248,10 @@ export async function handleApps(
         client_id,
         display_name: config.displayName,
         ...(metadata ? { metadata } : {}),
+        ...(scopes !== undefined ? { scopes } : {}),
+        ...(config.access
+          ? { access: { groups: config.access.groups, service_token: config.access.serviceToken } }
+          : {}),
       };
     })
   );
@@ -445,6 +470,23 @@ async function loadIdentity() {
 }
 
 function renderLinkCard(entry) {
+  function summarizeScopes(scopes) {
+    if (scopes === undefined || scopes === null) {
+      return "";
+    }
+    if (Array.isArray(scopes)) {
+      return scopes.join(", ");
+    }
+    if (typeof scopes === "object") {
+      return Object.keys(scopes)
+        .map(function (key) {
+          return key + ":" + scopes[key];
+        })
+        .join(", ");
+    }
+    return String(scopes);
+  }
+
   const badgeClass = entry.linked ? "linked" : "unlinked";
   const badgeText = entry.linked ? "Linked" : "Not linked";
   const title = (entry.metadata && entry.metadata.name) || entry.display_name || entry.slug;
@@ -459,6 +501,16 @@ function renderLinkCard(entry) {
   }
   if (entry.last_refreshed) {
     rows += '<div class="row"><span class="k">Last refreshed:</span> ' + esc(new Date(entry.last_refreshed).toLocaleString()) + '</div>';
+  }
+  const scopesSummary = summarizeScopes(entry.scopes);
+  if (scopesSummary) {
+    rows += '<div class="row"><span class="k">Scopes:</span> ' + esc(scopesSummary) + '</div>';
+  }
+  if (entry.access && Array.isArray(entry.access.groups) && entry.access.groups.length > 0) {
+    rows +=
+      '<div class="row"><span class="k">Required groups:</span> ' +
+      esc(entry.access.groups.join(", ")) +
+      '</div>';
   }
 
   let action;
@@ -488,7 +540,12 @@ async function loadLinks() {
   });
   const merged = links.map(function (entry) {
     const app = appsBySlug[entry.slug] || {};
-    return Object.assign({}, entry, { display_name: app.display_name, metadata: app.metadata });
+    return Object.assign({}, entry, {
+      display_name: app.display_name,
+      metadata: app.metadata,
+      scopes: app.scopes,
+      access: app.access,
+    });
   });
 
   const container = document.getElementById("links");

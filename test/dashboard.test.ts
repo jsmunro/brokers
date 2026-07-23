@@ -492,6 +492,8 @@ describe("GET /api/apps", () => {
       org: "jsmunro",
       client_id: "Iv23lifj0i4aV6qYR76i",
       display_name: "Brokers repo",
+      scopes: "installation-defined",
+      access: { groups: ["org-members"], service_token: true },
     });
 
     const cloudflare = body.find((e) => e.slug === "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
@@ -501,6 +503,8 @@ describe("GET /api/apps", () => {
       org: "jackm",
       client_id: "9f2c965eeb2fcc390fc3843935de35bc",
       display_name: "central-auth-broker",
+      scopes: "var:CLOUDFLARE_OAUTH_SCOPES",
+      access: { groups: ["org-members"], service_token: false },
     });
   });
 
@@ -519,9 +523,36 @@ describe("GET /api/apps", () => {
 
     const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
     expect(github.metadata).toEqual({ name: "Brokers App", fetched_at: "2026-01-01T00:00:00.000Z" });
+    // No cached permissions object yet -> scopes falls back to the declared value.
+    expect(github.scopes).toBe("installation-defined");
 
     const cloudflare = body.find((e) => e.slug === "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
     expect(cloudflare.metadata).toBeUndefined();
+  });
+
+  it("resolves scopes to the cached metadata.permissions object when source is metadata.permissions", async () => {
+    const env = makeEnv();
+    await env.AUTH_TOKENS.put(
+      "app:github/jsmunro/Iv23lifj0i4aV6qYR76i",
+      JSON.stringify({
+        name: "Brokers App",
+        fetched_at: "2026-01-01T00:00:00.000Z",
+        permissions: { contents: "read", issues: "write" },
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/api/apps", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    const body = (await res.json()) as any[];
+
+    const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
+    expect(github.scopes).toEqual({ contents: "read", issues: "write" });
+
+    // Cloudflare has no metadata.permissions source -> unaffected, still the declared string.
+    const cloudflare = body.find((e) => e.slug === "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
+    expect(cloudflare.scopes).toBe("var:CLOUDFLARE_OAUTH_SCOPES");
   });
 
   it("401 when unauthenticated", async () => {
@@ -591,6 +622,41 @@ describe("dashboard card rendering (inline client script)", () => {
     const out = render({ slug: "github/jsmunro/Iv23lifj0i4aV6qYR76i", linked: false, auth_url: "https://x" });
 
     expect(out).toContain(">github/jsmunro/Iv23lifj0i4aV6qYR76i ");
+  });
+
+  it("shows a scopes summary and required groups, escaped, when present", async () => {
+    const render = await fetchRenderLinkCard();
+    const out = render({
+      slug: "github/jsmunro/Iv23lifj0i4aV6qYR76i",
+      linked: true,
+      display_name: "Brokers repo",
+      scopes: { contents: "read", "issues<script>": "write" },
+      access: { groups: ["org-members", "<b>admins</b>"], service_token: true },
+    });
+
+    expect(out).toContain("Scopes:");
+    expect(out).toContain("contents:read");
+    // The scopes object key is HTML-escaped, never raw markup.
+    expect(out).toContain("issues&lt;script&gt;:write");
+    expect(out).not.toContain("<script>");
+
+    expect(out).toContain("Required groups:");
+    expect(out).toContain("org-members");
+    expect(out).toContain("&lt;b&gt;admins&lt;/b&gt;");
+    expect(out).not.toContain("<b>admins</b>");
+  });
+
+  it("renders no scopes/groups rows when absent", async () => {
+    const render = await fetchRenderLinkCard();
+    const out = render({
+      slug: "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc",
+      linked: false,
+      display_name: "central-auth-broker",
+      auth_url: "https://x",
+    });
+
+    expect(out).not.toContain("Scopes:");
+    expect(out).not.toContain("Required groups:");
   });
 });
 
