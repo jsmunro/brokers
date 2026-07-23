@@ -70,6 +70,7 @@ export const appConfigs: Record<string, AppConfig> = {
       clientAuth: "body",
       describeLink: githubDescribeLink,
     }),
+    appAuth: { kind: "github-app-jwt", appIdVar: "GITHUB_APP_ID", privateKeyVar: "GITHUB_APP_PRIVATE_KEY" },
   },
   [CLOUDFLARE_SLUG]: {
     slug: CLOUDFLARE_SLUG,

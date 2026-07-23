@@ -474,6 +474,126 @@ describe("DELETE /api/links/<provider>", () => {
   });
 });
 
+describe("GET /api/apps", () => {
+  it("lists every registered app with provider/org/client_id derived from the slug", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/api/apps", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any[];
+
+    const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
+    expect(github).toEqual({
+      slug: "github/jsmunro/Iv23lifj0i4aV6qYR76i",
+      provider: "github",
+      org: "jsmunro",
+      client_id: "Iv23lifj0i4aV6qYR76i",
+      display_name: "Brokers repo",
+    });
+
+    const cloudflare = body.find((e) => e.slug === "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
+    expect(cloudflare).toEqual({
+      slug: "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc",
+      provider: "cloudflare",
+      org: "jackm",
+      client_id: "9f2c965eeb2fcc390fc3843935de35bc",
+      display_name: "central-auth-broker",
+    });
+  });
+
+  it("includes metadata from the KV cache when present", async () => {
+    const env = makeEnv();
+    await env.AUTH_TOKENS.put(
+      "app:github/jsmunro/Iv23lifj0i4aV6qYR76i",
+      JSON.stringify({ name: "Brokers App", fetched_at: "2026-01-01T00:00:00.000Z" })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/api/apps", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    const body = (await res.json()) as any[];
+
+    const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
+    expect(github.metadata).toEqual({ name: "Brokers App", fetched_at: "2026-01-01T00:00:00.000Z" });
+
+    const cloudflare = body.find((e) => e.slug === "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
+    expect(cloudflare.metadata).toBeUndefined();
+  });
+
+  it("401 when unauthenticated", async () => {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/api/apps");
+    const res = await worker.fetch(request, env, {} as any);
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("dashboard card rendering (inline client script)", () => {
+  // renderLinkCard is defined inside the served page's inline <script>. Extract
+  // it the same way extractRenderDeviceSection does, and exercise it directly.
+  function extractRenderLinkCard(html: string): (entry: any) => string {
+    const start = html.indexOf("function renderLinkCard");
+    const end = html.indexOf("\nasync function loadLinks");
+    const src = html.slice(start, end);
+    const esc = (s: unknown) =>
+      String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    // eslint-disable-next-line no-new-func
+    return new Function("esc", `${src}\nreturn renderLinkCard;`)(esc);
+  }
+
+  async function fetchRenderLinkCard(): Promise<(entry: any) => string> {
+    const env = makeEnv();
+    const request = new Request("https://broker.jsmunro.me/", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    const html = await res.text();
+    return extractRenderLinkCard(html);
+  }
+
+  it("titles the card with metadata.name when present, subtitled by the full slug", async () => {
+    const render = await fetchRenderLinkCard();
+    const out = render({
+      slug: "github/jsmunro/Iv23lifj0i4aV6qYR76i",
+      linked: true,
+      display_name: "Brokers repo",
+      metadata: { name: "Brokers App" },
+    });
+
+    expect(out).toContain(">Brokers App ");
+    expect(out).toContain("github/jsmunro/Iv23lifj0i4aV6qYR76i");
+  });
+
+  it("falls back to display_name when no metadata is present", async () => {
+    const render = await fetchRenderLinkCard();
+    const out = render({
+      slug: "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc",
+      linked: false,
+      display_name: "central-auth-broker",
+      auth_url: "https://dash.cloudflare.com/oauth2/auth?...",
+    });
+
+    expect(out).toContain(">central-auth-broker ");
+    expect(out).toContain("cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
+  });
+
+  it("falls back to the slug itself when neither metadata nor display_name is present", async () => {
+    const render = await fetchRenderLinkCard();
+    const out = render({ slug: "github/jsmunro/Iv23lifj0i4aV6qYR76i", linked: false, auth_url: "https://x" });
+
+    expect(out).toContain(">github/jsmunro/Iv23lifj0i4aV6qYR76i ");
+  });
+});
+
 describe("callback success page", () => {
   it("links back to the dashboard", async () => {
     const env = makeEnv();

@@ -38,6 +38,8 @@ export function makeEnv(overrides: Partial<Env> = {}): Env {
     AUTH_TOKENS: kv as unknown as Env["AUTH_TOKENS"],
     GITHUB_CLIENT_ID: "Iv23test",
     GITHUB_CLIENT_SECRET: "test-secret",
+    GITHUB_APP_ID: "test-app-id",
+    GITHUB_APP_PRIVATE_KEY: "test-app-private-key",
     CLOUDFLARE_OAUTH_CLIENT_ID: "cf-client-id",
     CLOUDFLARE_OAUTH_CLIENT_SECRET: "cf-client-secret",
     CLOUDFLARE_OAUTH_SCOPES: "offline_access d1.read",
@@ -84,6 +86,22 @@ export async function generateTestKeyPair(kid = "test-kid"): Promise<TestKeyPair
     publicJwk: { ...publicJwk, kid },
     privateKey: keyPair.privateKey,
   };
+}
+
+function bytesToStandardBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const b of bytes) {
+    binary += String.fromCharCode(b);
+  }
+  return btoa(binary);
+}
+
+/** Exports a CryptoKey private key as a PKCS#8 PEM string, for app-auth JWT tests. */
+export async function exportPrivateKeyAsPkcs8Pem(privateKey: CryptoKey): Promise<string> {
+  const pkcs8 = (await crypto.subtle.exportKey("pkcs8", privateKey)) as ArrayBuffer;
+  const b64 = bytesToStandardBase64(new Uint8Array(pkcs8));
+  const lines = b64.match(/.{1,64}/g) ?? [b64];
+  return `-----BEGIN PRIVATE KEY-----\n${lines.join("\n")}\n-----END PRIVATE KEY-----\n`;
 }
 
 export async function signTestJwt(

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { makeEnv, makeKvStub } from "./helpers";
+import { makeEnv, makeKvStub, exportPrivateKeyAsPkcs8Pem, generateTestKeyPair } from "./helpers";
 
 vi.mock("../src/access", () => ({
   verifyAccessJwt: vi.fn(async (jwt: string) => {
@@ -518,5 +518,95 @@ describe("scheduled cron rotation", () => {
     const meta = (await env.AUTH_TOKENS.get("meta:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com", "json")) as any;
     expect(meta.linked_at).toBe("2026-01-01T00:00:00.000Z");
     expect(meta.last_refreshed).toBeTruthy();
+  });
+});
+
+describe("scheduled cron app metadata refresh", () => {
+  const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
+  const GITHUB_APP_URL = "https://api.github.com/app";
+
+  it("runs after token refresh, populating the KV app:<slug> cache for github", async () => {
+    const { privateKey } = await generateTestKeyPair();
+    const pem = await exportPrivateKeyAsPkcs8Pem(privateKey);
+    const env = makeEnv({ GITHUB_APP_ID: "42", GITHUB_APP_PRIVATE_KEY: pem });
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com", "ghr_alice_old");
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input.toString();
+        if (url === GITHUB_TOKEN_URL) {
+          return new Response(
+            JSON.stringify({ access_token: "tok", expires_in: 28800, refresh_token: "ghr_alice_new" }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url === GITHUB_APP_URL) {
+          return new Response(JSON.stringify({ name: "Brokers App", html_url: "https://github.com/apps/brokers" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      })
+    );
+
+    await worker.scheduled({} as any, env, {} as any);
+
+    // Token refresh still happened.
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com")).toBe(
+      "ghr_alice_new"
+    );
+
+    const cached = (await env.AUTH_TOKENS.get("app:github/jsmunro/Iv23lifj0i4aV6qYR76i", "json")) as any;
+    expect(cached.name).toBe("Brokers App");
+    expect(cached.html_url).toBe("https://github.com/apps/brokers");
+    expect(cached.fetched_at).toBeTruthy();
+
+    // Cloudflare has no appAuth — no metadata cache entry should be written for it.
+    expect(await env.AUTH_TOKENS.get("app:cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc")).toBeNull();
+  });
+
+  it("logs and leaves stale cache on metadata fetch failure without breaking token refresh", async () => {
+    const { privateKey } = await generateTestKeyPair();
+    const pem = await exportPrivateKeyAsPkcs8Pem(privateKey);
+    const env = makeEnv({ GITHUB_APP_ID: "42", GITHUB_APP_PRIVATE_KEY: pem });
+    await env.AUTH_TOKENS.put("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com", "ghr_alice_old");
+    await env.AUTH_TOKENS.put(
+      "app:github/jsmunro/Iv23lifj0i4aV6qYR76i",
+      JSON.stringify({ name: "Stale App", fetched_at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() })
+    );
+
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input.toString();
+        if (url === GITHUB_TOKEN_URL) {
+          return new Response(
+            JSON.stringify({ access_token: "tok", expires_in: 28800, refresh_token: "ghr_alice_new" }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url === GITHUB_APP_URL) {
+          return new Response("server error", { status: 500 });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      })
+    );
+
+    await worker.scheduled({} as any, env, {} as any);
+
+    // Token refresh unaffected by the metadata failure.
+    expect(await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:alice@example.com")).toBe(
+      "ghr_alice_new"
+    );
+
+    // Stale metadata is retained rather than cleared.
+    const cached = (await env.AUTH_TOKENS.get("app:github/jsmunro/Iv23lifj0i4aV6qYR76i", "json")) as any;
+    expect(cached.name).toBe("Stale App");
+    expect(consoleErrorSpy).toHaveBeenCalled();
+
+    consoleErrorSpy.mockRestore();
   });
 });

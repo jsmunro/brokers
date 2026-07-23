@@ -1,7 +1,8 @@
 import type { AuthProvider, Env, LinkMeta } from "./types";
 import { verifyAccessJwt } from "./access";
-import { apps as providers } from "./registry";
-import { renderDashboardPage, handleMe, handleLinks, handleUnlink } from "./dashboard";
+import { apps as providers, appConfigs } from "./registry";
+import { renderDashboardPage, handleMe, handleLinks, handleUnlink, handleApps } from "./dashboard";
+import { refreshAppMetadataCache } from "./appauth";
 
 const KV_PREFIX = "refresh:";
 const META_PREFIX = "meta:";
@@ -174,6 +175,10 @@ export default {
       return handleUnlink(env, userId, providers, slug);
     }
 
+    if (action === "api" && segments[1] === "apps" && segments.length === 2 && request.method === "GET") {
+      return handleApps(env, appConfigs);
+    }
+
     if (action !== "get-token" && action !== "callback") {
       return new Response("Endpoint Not Found", {
         status: 404,
@@ -221,6 +226,18 @@ export default {
         await touchMeta(env, provider.slug, userId);
       } catch (err) {
         console.error(`scheduled: failed to refresh ${key.name}`, err);
+      }
+    }
+
+    // Metadata refresh runs after the token refresh loop; a failure fetching
+    // one app's metadata must never affect another app's metadata refresh or
+    // the token refresh loop above (refreshAppMetadataCache never throws,
+    // but the try/catch here keeps that isolation explicit and future-proof).
+    for (const config of Object.values(appConfigs)) {
+      try {
+        await refreshAppMetadataCache(config, env);
+      } catch (err) {
+        console.error(`scheduled: failed to refresh metadata for ${config.slug}`, err);
       }
     }
   },
