@@ -1,17 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeEnv } from "./helpers";
 
-vi.mock("../src/access", () => ({
-  verifyAccessJwt: vi.fn(async (jwt: string) => {
-    if (jwt === "valid-jwt") {
-      return { email: "user@example.com", exp: 1234567890 };
-    }
-    if (jwt === "valid-jwt-with-name") {
-      return { email: "user@example.com", exp: 1234567890, name: "Jane Doe", idp: { type: "github" } };
-    }
-    throw new Error("invalid");
-  }),
-}));
+vi.mock("../src/access", async () => {
+  const actual = await vi.importActual<typeof import("../src/access")>("../src/access");
+  return {
+    parseAccessAppAuds: actual.parseAccessAppAuds,
+    verifyAccessJwt: vi.fn(async (jwt: string) => {
+      if (jwt === "valid-jwt") {
+        return { email: "user@example.com", exp: 1234567890 };
+      }
+      if (jwt === "valid-jwt-with-name") {
+        return { email: "user@example.com", exp: 1234567890, name: "Jane Doe", idp: { type: "github" } };
+      }
+      if (jwt === "service-jwt") {
+        return { common_name: "svc-account.access" };
+      }
+      throw new Error("invalid");
+    }),
+  };
+});
 
 import worker from "../src/index";
 
@@ -166,6 +173,24 @@ describe("GET /api/me", () => {
     const request = new Request("https://broker.jsmunro.me/api/me");
     const res = await worker.fetch(request, env, {} as any);
     expect(res.status).toBe(401);
+  });
+
+  it("returns { email: common_name, service: true } for a service-token principal, with no device fetch", async () => {
+    const env = makeEnv();
+    const fetchMock = vi.fn(async () => {
+      throw new Error("get-identity must not be called for a service principal");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request = new Request("https://broker.jsmunro.me/api/me", {
+      headers: { "Cf-Access-Jwt-Assertion": "service-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ email: "svc-account.access", service: true });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -493,7 +518,12 @@ describe("GET /api/apps", () => {
       client_id: "Iv23lifj0i4aV6qYR76i",
       display_name: "Brokers repo",
       scopes: "installation-defined",
-      access: { groups: ["org-members"], service_token: true },
+      access: {
+        groups: ["org-members"],
+        token_aud: "github-token-aud",
+        link_aud: "github-link-aud",
+        service_token: true,
+      },
     });
 
     const cloudflare = body.find((e) => e.slug === "cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc");
@@ -504,8 +534,44 @@ describe("GET /api/apps", () => {
       client_id: "9f2c965eeb2fcc390fc3843935de35bc",
       display_name: "central-auth-broker",
       scopes: "var:CLOUDFLARE_OAUTH_SCOPES",
-      access: { groups: ["org-members"], service_token: false },
+      access: {
+        groups: ["org-members"],
+        token_aud: "cloudflare-token-aud",
+        link_aud: "cloudflare-link-aud",
+        service_token: false,
+      },
     });
+  });
+
+  it("omits token_aud/link_aud when ACCESS_APP_AUDS has no mapping for the slug", async () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{}" });
+    const request = new Request("https://broker.jsmunro.me/api/apps", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+    const body = (await res.json()) as any[];
+
+    const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
+    expect(github.access).toEqual({ groups: ["org-members"], service_token: true });
+    expect(github.access.token_aud).toBeUndefined();
+    expect(github.access.link_aud).toBeUndefined();
+  });
+
+  it("omits token_aud/link_aud (logged) rather than failing when ACCESS_APP_AUDS is malformed", async () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{not json" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = new Request("https://broker.jsmunro.me/api/apps", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any[];
+    const github = body.find((e) => e.slug === "github/jsmunro/Iv23lifj0i4aV6qYR76i");
+    expect(github.access.token_aud).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
   });
 
   it("includes metadata from the KV cache when present", async () => {

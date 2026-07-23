@@ -1,5 +1,5 @@
 import type { AuthProvider, Env, LinkMeta } from "./types";
-import { verifyAccessJwt } from "./access";
+import { verifyAccessJwt, parseAccessAppAuds } from "./access";
 import { apps as providers, appConfigs } from "./registry";
 import { renderDashboardPage, handleMe, handleLinks, handleUnlink, handleApps } from "./dashboard";
 import { refreshAppMetadataCache } from "./appauth";
@@ -149,14 +149,49 @@ export default {
       return jsonResponse({ error: "Unauthorized: Cloudflare Access Required" }, 401);
     }
 
+    // Strict per-slug AUD selection, resolved from the URL path alone
+    // (before any provider code runs): /get-token/<slug> and /callback/<slug>
+    // for a manifest-registered slug verify against ONLY that slug's
+    // token/link aud; everything else (unregistered slugs, dashboard,
+    // /api/*) verifies against ONLY the root ACCESS_AUD. A manifest-registered
+    // slug missing from ACCESS_APP_AUDS, or malformed ACCESS_APP_AUDS JSON,
+    // is a deployment configuration error: fail closed (403, logged) without
+    // ever verifying the JWT or issuing a token.
+    let expectedAuds: string[];
+    if ((action === "get-token" || action === "callback") && providers[rest.join("/")]) {
+      const slug = rest.join("/");
+      let auds: Record<string, { token: string; link: string }>;
+      try {
+        auds = parseAccessAppAuds(env);
+      } catch (err) {
+        console.error(`ACCESS_APP_AUDS is malformed; failing closed for slug ${slug}`, err);
+        return jsonResponse({ error: "Server misconfiguration: ACCESS_APP_AUDS is malformed" }, 403);
+      }
+      const mapped = auds[slug];
+      if (!mapped) {
+        console.error(`ACCESS_APP_AUDS has no entry for registered slug ${slug}; failing closed`);
+        return jsonResponse({ error: `Access misconfigured for ${slug}` }, 403);
+      }
+      expectedAuds = action === "get-token" ? [mapped.token] : [mapped.link];
+    } else {
+      expectedAuds = [env.ACCESS_AUD];
+    }
+
     let userId: string;
     let payload: Record<string, unknown>;
     try {
-      payload = await verifyAccessJwt(accessJwt, env);
-      userId = payload.email as string;
+      payload = await verifyAccessJwt(accessJwt, env, expectedAuds);
     } catch {
       return jsonResponse({ error: "Invalid Access token" }, 403);
     }
+
+    // Access `non_identity` (service-token) JWTs carry `common_name`, no
+    // `email`. Identity = email ?? common_name; neither present is invalid.
+    const identity = (payload.email as string | undefined) ?? (payload.common_name as string | undefined);
+    if (!identity) {
+      return jsonResponse({ error: "Invalid Access token" }, 403);
+    }
+    userId = identity;
 
     if (segments.length === 0 && request.method === "GET") {
       return renderDashboardPage();

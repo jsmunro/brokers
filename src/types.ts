@@ -10,6 +10,8 @@ export interface Env {
   BROKER_URL: string;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
+  /** JSON map `{ "<slug>": { "token": "<aud>", "link": "<aud>" } }`, synced from Terraform by `infra/sync-auds.sh`. */
+  ACCESS_APP_AUDS: string;
   ENVIRONMENT: string;
 }
 
@@ -73,7 +75,7 @@ export interface AppScopes {
   source?: "metadata.permissions";
 }
 
-/** Per-app access requirements, surfaced via `/api/apps` (`access.token_aud`/`link_aud` land in a later phase). */
+/** Per-app access requirements, surfaced via `/api/apps` (`token_aud`/`link_aud` are added there from `ACCESS_APP_AUDS`, not stored on this type). */
 export interface AppAccess {
   /** Access Group names (from `manifest.groups`) required to use this app. */
   groups: string[];
