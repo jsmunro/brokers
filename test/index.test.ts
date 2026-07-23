@@ -482,10 +482,44 @@ describe("strict per-slug AUD selection", () => {
 
     errorSpy.mockRestore();
   });
+
+  it("fails closed with 403 (logged) for a manifest-registered callback slug missing from ACCESS_APP_AUDS, without verifying the JWT", async () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{}" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = new Request(
+      "https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=abc123",
+      { headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" } }
+    );
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(403);
+    expect(verifyAccessJwt).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("github/jsmunro/Iv23lifj0i4aV6qYR76i"));
+
+    errorSpy.mockRestore();
+  });
+
+  it("fails closed with 403 for malformed ACCESS_APP_AUDS JSON on /callback, never running provider code", async () => {
+    const env = makeEnv({ ACCESS_APP_AUDS: "{not json" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = new Request(
+      "https://broker.jsmunro.me/callback/github/jsmunro/Iv23lifj0i4aV6qYR76i?code=abc123",
+      { headers: { "Cf-Access-Jwt-Assertion": "valid-jwt" } }
+    );
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as any;
+    expect(body.token).toBeUndefined();
+    expect(verifyAccessJwt).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
 });
 
 describe("service-token identity resolution", () => {
-  it("get-token stores the KV entry under common_name when the JWT has no email", async () => {
+  it("callback stores the KV entry under common_name when the JWT has no email", async () => {
     const env = makeEnv();
     vi.stubGlobal(
       "fetch",
@@ -508,6 +542,41 @@ describe("service-token identity resolution", () => {
       "refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:svc-account.access"
     );
     expect(stored).toBe("ghr_refresh");
+  });
+
+  it("get-token stores the rotated refresh token under common_name when the service JWT has no email", async () => {
+    const env = makeEnv();
+    await env.AUTH_TOKENS.put(
+      "refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:svc-account.access",
+      "ghr_old"
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({ access_token: "gho_new", expires_in: 28800, refresh_token: "ghr_new" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const request = new Request("https://broker.jsmunro.me/get-token/github/jsmunro/Iv23lifj0i4aV6qYR76i", {
+      headers: { "Cf-Access-Jwt-Assertion": "service-jwt" },
+    });
+    const res = await worker.fetch(request, env, {} as any);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.token).toBe("gho_new");
+    expect(body.expires_in).toBe(28800);
+
+    expect(
+      await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:svc-account.access")
+    ).toBe("ghr_new");
+    expect(
+      await env.AUTH_TOKENS.get("refresh:github/jsmunro/Iv23lifj0i4aV6qYR76i:svc-account.access@example.com")
+    ).toBeNull();
   });
 
   it("returns 403 when the JWT payload has neither email nor common_name", async () => {
