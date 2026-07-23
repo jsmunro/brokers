@@ -7,7 +7,7 @@ Approved decisions: full migration with NO legacy routes/keys; addressing is `<p
 
 - Every app registration is addressed by slug `<provider>/<org>/<clientid>`:
   - `provider`: `[a-z0-9-]+` (e.g. `github`, `cloudflare`)
-  - `org`: provider-side namespace, `[a-z0-9-]+` (GitHub owner login e.g. `jackm43`; Cloudflare account name `jackm`)
+  - `org`: provider-side namespace, `[a-z0-9-]+` (GitHub owner login e.g. `jsmunro`; Cloudflare account name `jackm`)
   - `clientid`: the OAuth client id verbatim (URL-safe in practice; validated `[A-Za-z0-9._~-]+`)
 - Routes become exactly: `GET /get-token/<provider>/<org>/<clientid>`, `GET /callback/<provider>/<org>/<clientid>`, `DELETE /api/links/<provider>/<org>/<clientid>`. Two-segment forms (`/get-token/github`) are GONE — they 404 with the standard unsupported-provider shape. Engine joins all segments after the action with `/` and looks up the registry; the registry key IS the slug.
 - KV keys: `refresh:<slug>:<userId>`, `meta:<slug>:<userId>` (slug contains `/`, never `:` — cron's split(":") parsing unchanged). Existing 2-segment-era keys are migrated at deploy time (Task: copy values to new keys, delete old) — refresh tokens remain valid.
@@ -29,7 +29,7 @@ Approved decisions: full migration with NO legacy routes/keys; addressing is `<p
   }
   ```
 - Current registrations migrate to:
-  - `github/jackm43/Iv23lifj0i4aV6qYR76i` — displayName "Brokers repo", existing GITHUB_CLIENT_ID/SECRET vars, describeLink as today.
+  - `github/jsmunro/Iv23lifj0i4aV6qYR76i` — displayName "Brokers repo", existing GITHUB_CLIENT_ID/SECRET vars, describeLink as today.
   - `cloudflare/jackm/9f2c965eeb2fcc390fc3843935de35bc` — displayName "central-auth-broker", CLOUDFLARE_OAUTH_* vars, scope param from CLOUDFLARE_OAUTH_SCOPES, describeLink as today.
 
 ## App metadata subsystem
